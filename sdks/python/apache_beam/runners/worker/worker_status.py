@@ -246,10 +246,8 @@ class FnApiWorkerStatusHandler(object):
       step_name = sampler_info.state_name.step_name
       state_name = sampler_info.state_name.name
       lull_seconds = sampler_info.time_since_transition / 1e9
-      state_lull_log = (
-          'Operation ongoing for over %.2f seconds in state %s' %
-          (lull_seconds, state_name))
-      step_name_log = (' in step %s ' % step_name) if step_name else ''
+
+      step_name_log = (' in step %s' % step_name) if step_name else ''
 
       exec_thread = getattr(sampler_info, 'tracked_thread', None)
       if exec_thread is not None:
@@ -260,9 +258,12 @@ class FnApiWorkerStatusHandler(object):
         stack_trace = '-NOT AVAILABLE-'
 
       _LOGGER.warning(
-          '%s%s without returning. Current Traceback:\n%s',
-          state_lull_log,
+          ('Operation ongoing%s for at least %.2f seconds'
+           ' without outputting or completing in state %s.\n'
+           'Current Traceback:\n%s'),
           step_name_log,
+          lull_seconds,
+          state_name,
           stack_trace)
 
   def _passed_lull_timeout_since_last_log(self) -> bool:

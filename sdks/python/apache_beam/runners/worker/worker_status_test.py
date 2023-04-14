@@ -101,12 +101,14 @@ class FnApiWorkerStatusHandlerTest(unittest.TestCase):
         sampler_info = get_state_sampler_info_for_lull(21 * 60)
         self.fn_status_handler._log_lull_sampler_info(sampler_info)
 
-        processing_template = warn_mock.call_args[0][1]
-        step_name_template = warn_mock.call_args[0][2]
-        traceback = warn_mock.call_args = warn_mock.call_args[0][3]
+        step_name_template = warn_mock.call_args[0][1]
+        duration_template = warn_mock.call_args[0][2]
+        processing_template = warn_mock.call_args[0][3]
+        traceback = warn_mock.call_args[0][4]
 
-        self.assertIn('progress-msecs', processing_template)
         self.assertIn('step_name', step_name_template)
+        self.assertEqual(21 * 60, duration_template)
+        self.assertIn('progress-msecs', processing_template)
         self.assertIn('test_log_lull_in_bundle_processor', traceback)
 
       with mock.patch('time.time') as time_mock:
