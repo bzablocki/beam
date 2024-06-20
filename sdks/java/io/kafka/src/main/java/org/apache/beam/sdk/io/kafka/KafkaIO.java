@@ -1739,7 +1739,6 @@ public class KafkaIO {
             }
           }
         }
-        LOG.info("bzablockilog output {} kafkaSourceDescriptots", partitions.size());
         for (TopicPartition topicPartition : partitions) {
           receiver.output(
               KafkaSourceDescriptor.of(
@@ -2018,9 +2017,9 @@ public class KafkaIO {
    * the transform will expand to:
    *
    * <pre>{@code
-   * PCollection<KafkaSourceDescriptor> --> ParDo(ReadFromKafkaDoFn<KafkaSourceDescriptor, KV<KafkaSourceDescriptor, KafkaRecord>>) --> Reshuffle() --> Map(output KafkaRecord)
-   *                                                                                                                                         |
-   *                                                                                                                                         --> KafkaCommitOffset
+   * PCollection<KafkaSourceDescriptor> --> ParDo(ReadFromKafkaDoFn<KafkaSourceDescriptor, KV<KafkaSourceDescriptor, KafkaRecord>>) --> Map(output KafkaRecord)
+   *                                                                                                          |
+   *                                                                                                          --> KafkaCommitOffset
    * }</pre>
    *
    * . Note that this expansion is not supported when running with x-lang on Dataflow.
@@ -2528,16 +2527,6 @@ public class KafkaIO {
                             .getSchemaCoder(KafkaSourceDescriptor.class),
                         recordCoder));
         if (isCommitOffsetEnabled() && !configuredKafkaCommit()) {
-          // outputWithDescriptor =
-          //     outputWithDescriptor
-          //         .apply(Reshuffle.viaRandomKey())
-          //         .setCoder(
-          //             KvCoder.of(
-          //                 input
-          //                     .getPipeline()
-          //                     .getSchemaRegistry()
-          //                     .getSchemaCoder(KafkaSourceDescriptor.class),
-          //                 recordCoder));
           PCollection<Void> unused = outputWithDescriptor.apply(new KafkaCommitOffset<K, V>(this));
           unused.setCoder(VoidCoder.of());
         }

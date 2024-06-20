@@ -28,23 +28,22 @@ import org.apache.beam.sdk.coders.VoidCoder;
 import org.apache.beam.sdk.schemas.NoSuchSchemaException;
 import org.apache.beam.sdk.transforms.Combine;
 import org.apache.beam.sdk.transforms.DoFn;
-import org.apache.beam.sdk.transforms.MapElements;
 import org.apache.beam.sdk.transforms.Max;
 import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.transforms.SerializableFunction;
 import org.apache.beam.sdk.transforms.windowing.AfterProcessingTime;
-import org.apache.beam.sdk.transforms.windowing.FixedWindows;
+import org.apache.beam.sdk.transforms.windowing.GlobalWindow;
 import org.apache.beam.sdk.transforms.windowing.GlobalWindows;
 import org.apache.beam.sdk.transforms.windowing.Repeatedly;
 import org.apache.beam.sdk.transforms.windowing.Window;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
-import org.apache.beam.sdk.values.TypeDescriptor;
 import org.apache.kafka.clients.consumer.Consumer;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.joda.time.Duration;
+import org.joda.time.Instant;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -103,13 +102,43 @@ public class KafkaCommitOffset<K, V>
     }
   }
 
+  class MaxOffsetFn
+      extends DoFn<KV<KafkaSourceDescriptor, KafkaRecord<K, V>>, KV<KafkaSourceDescriptor, Long>> {
+    private final Map<KafkaSourceDescriptor, Long> maxObserved = new HashMap<>();
+
+    @StartBundle
+    public void startBundle() {
+      maxObserved.clear();
+    }
+
+    @RequiresStableInput
+    @ProcessElement
+    public void processElement(@Element KV<KafkaSourceDescriptor, KafkaRecord<K, V>> element) {
+      maxObserved.compute(
+          element.getKey(),
+          (k, v) -> {
+            long offset = element.getValue().getOffset();
+            if (v == null || v < offset) {
+              return offset;
+            }
+            return v;
+          });
+    }
+
+    @FinishBundle
+    public void finishBundle(FinishBundleContext context) {
+      maxObserved.forEach(
+          (k, v) -> {
+            context.output(KV.of(k, v), Instant.now(), GlobalWindow.INSTANCE);
+          });
+    }
+  }
+
   @Override
   public PCollection<Void> expand(PCollection<KV<KafkaSourceDescriptor, KafkaRecord<K, V>>> input) {
     try {
       return input
-          .apply(
-              MapElements.into(new TypeDescriptor<KV<KafkaSourceDescriptor, Long>>() {})
-                  .via(element -> KV.of(element.getKey(), element.getValue().getOffset())))
+          .apply(ParDo.of(new MaxOffsetFn()))
           .setCoder(
               KvCoder.of(
                   input
