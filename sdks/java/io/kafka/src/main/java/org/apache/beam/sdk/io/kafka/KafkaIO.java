@@ -75,7 +75,6 @@ import org.apache.beam.sdk.transforms.Impulse;
 import org.apache.beam.sdk.transforms.MapElements;
 import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.transforms.ParDo;
-import org.apache.beam.sdk.transforms.Reshuffle;
 import org.apache.beam.sdk.transforms.SerializableFunction;
 import org.apache.beam.sdk.transforms.SimpleFunction;
 import org.apache.beam.sdk.transforms.display.DisplayData;
@@ -1740,6 +1739,7 @@ public class KafkaIO {
             }
           }
         }
+        LOG.info("bzablockilog output {} kafkaSourceDescriptots", partitions.size());
         for (TopicPartition topicPartition : partitions) {
           receiver.output(
               KafkaSourceDescriptor.of(
@@ -2528,16 +2528,16 @@ public class KafkaIO {
                             .getSchemaCoder(KafkaSourceDescriptor.class),
                         recordCoder));
         if (isCommitOffsetEnabled() && !configuredKafkaCommit()) {
-          outputWithDescriptor =
-              outputWithDescriptor
-                  .apply(Reshuffle.viaRandomKey())
-                  .setCoder(
-                      KvCoder.of(
-                          input
-                              .getPipeline()
-                              .getSchemaRegistry()
-                              .getSchemaCoder(KafkaSourceDescriptor.class),
-                          recordCoder));
+          // outputWithDescriptor =
+          //     outputWithDescriptor
+          //         .apply(Reshuffle.viaRandomKey())
+          //         .setCoder(
+          //             KvCoder.of(
+          //                 input
+          //                     .getPipeline()
+          //                     .getSchemaRegistry()
+          //                     .getSchemaCoder(KafkaSourceDescriptor.class),
+          //                 recordCoder));
           PCollection<Void> unused = outputWithDescriptor.apply(new KafkaCommitOffset<K, V>(this));
           unused.setCoder(VoidCoder.of());
         }

@@ -26,13 +26,17 @@ import org.apache.beam.sdk.coders.KvCoder;
 import org.apache.beam.sdk.coders.VarLongCoder;
 import org.apache.beam.sdk.coders.VoidCoder;
 import org.apache.beam.sdk.schemas.NoSuchSchemaException;
+import org.apache.beam.sdk.transforms.Combine;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.MapElements;
 import org.apache.beam.sdk.transforms.Max;
 import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.transforms.SerializableFunction;
+import org.apache.beam.sdk.transforms.windowing.AfterProcessingTime;
 import org.apache.beam.sdk.transforms.windowing.FixedWindows;
+import org.apache.beam.sdk.transforms.windowing.GlobalWindows;
+import org.apache.beam.sdk.transforms.windowing.Repeatedly;
 import org.apache.beam.sdk.transforms.windowing.Window;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
@@ -113,8 +117,14 @@ public class KafkaCommitOffset<K, V>
                       .getSchemaRegistry()
                       .getSchemaCoder(KafkaSourceDescriptor.class),
                   VarLongCoder.of()))
-          .apply(Window.into(FixedWindows.of(Duration.standardMinutes(5))))
-          .apply(Max.longsPerKey())
+          .apply(
+              Window.<KV<KafkaSourceDescriptor, Long>>into(new GlobalWindows())
+                  .triggering(
+                      Repeatedly.forever(
+                          AfterProcessingTime.pastFirstElementInPane()
+                              .plusDelayOf(Duration.standardMinutes(1))))
+                  .discardingFiredPanes())
+          .apply(Combine.fewKeys(Max.ofLongs()))
           .apply(ParDo.of(new CommitOffsetDoFn(readSourceDescriptors)))
           .setCoder(VoidCoder.of());
     } catch (NoSuchSchemaException e) {

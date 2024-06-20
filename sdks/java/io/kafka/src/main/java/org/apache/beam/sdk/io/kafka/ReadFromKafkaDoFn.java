@@ -66,6 +66,7 @@ import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.errors.SerializationException;
 import org.apache.kafka.common.serialization.Deserializer;
 import org.checkerframework.checker.nullness.qual.Nullable;
+import org.joda.time.Duration;
 import org.joda.time.Instant;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -316,7 +317,12 @@ abstract class ReadFromKafkaDoFn<K, V>
             ConsumerSpEL.offsetForTime(
                 offsetConsumer, kafkaSourceDescriptor.getTopicPartition(), stopReadTime);
       }
-
+      LOG.info(
+          "bzablockilog {} {} @GetInitialRestriction start:{} end:{}",
+          kafkaSourceDescriptor.getTopicPartition(),
+          Thread.currentThread().getId(),
+          startOffset,
+          endOffset);
       return new OffsetRange(startOffset, endOffset);
     }
   }
@@ -344,6 +350,11 @@ abstract class ReadFromKafkaDoFn<K, V>
         restrictionTracker(kafkaSourceDescriptor, offsetRange).getProgress().getWorkRemaining();
     // Before processing elements, we don't have a good estimated size of records and offset gap.
     if (!avgRecordSize.asMap().containsKey(kafkaSourceDescriptor.getTopicPartition())) {
+      LOG.info(
+          "bzablockilog {} {} getSize: {}",
+          kafkaSourceDescriptor.getTopicPartition(),
+          Thread.currentThread().getId(),
+          numRecords);
       return numRecords;
     }
     if (offsetEstimatorCache != null) {
@@ -352,14 +363,26 @@ abstract class ReadFromKafkaDoFn<K, V>
         perPartitionBacklogMetrics.put(tp.getKey().toString(), tp.getValue().estimate());
       }
     }
-
-    return avgRecordSize.get(kafkaSourceDescriptor.getTopicPartition()).getTotalSize(numRecords);
+    double totalSize =
+        avgRecordSize.get(kafkaSourceDescriptor.getTopicPartition()).getTotalSize(numRecords);
+    LOG.info(
+        "bzablockilog {} {} totalSize: {}",
+        kafkaSourceDescriptor.getTopicPartition(),
+        Thread.currentThread().getId(),
+        totalSize);
+    return totalSize;
   }
 
   @NewTracker
   public OffsetRangeTracker restrictionTracker(
       @Element KafkaSourceDescriptor kafkaSourceDescriptor, @Restriction OffsetRange restriction) {
     if (restriction.getTo() < Long.MAX_VALUE) {
+      LOG.info(
+          "bzablockilog {} {} @NewTracker restriction.getTo() < Long.MAX_VALUE start:{} end:{}",
+          kafkaSourceDescriptor.getTopicPartition(),
+          Thread.currentThread().getId(),
+          restriction.getFrom(),
+          restriction.getTo());
       return new OffsetRangeTracker(restriction);
     }
 
@@ -384,7 +407,12 @@ abstract class ReadFromKafkaDoFn<K, V>
       offsetEstimator = new KafkaLatestOffsetEstimator(offsetConsumer, topicPartition);
       offsetEstimatorCacheInstance.put(topicPartition, offsetEstimator);
     }
-
+    LOG.info(
+        "bzablockilog {} {} @NewTracker new GrowableOffsetRangeTracker start:{} end:{}",
+        kafkaSourceDescriptor.getTopicPartition(),
+        Thread.currentThread().getId(),
+        restriction.getFrom(),
+        "LONG.max?");
     return new GrowableOffsetRangeTracker(restriction.getFrom(), offsetEstimator);
   }
 
@@ -395,6 +423,11 @@ abstract class ReadFromKafkaDoFn<K, V>
       WatermarkEstimator<Instant> watermarkEstimator,
       MultiOutputReceiver receiver)
       throws Exception {
+    long threadId = Thread.currentThread().getId();
+    LOG.info(
+        "bzablockilog {} {} start process element",
+        kafkaSourceDescriptor.getTopicPartition(),
+        threadId);
     final LoadingCache<TopicPartition, AverageRecordSize> avgRecordSize =
         Preconditions.checkStateNotNull(this.avgRecordSize);
     final Deserializer<K> keyDeserializerInstance =
@@ -418,6 +451,10 @@ abstract class ReadFromKafkaDoFn<K, V>
       // Attempt to claim the last element in the restriction, such that the restriction tracker
       // doesn't throw an exception when checkDone is called
       tracker.tryClaim(tracker.currentRestriction().getTo() - 1);
+      LOG.info(
+          "bzablockilog {} {} checkStopReadingFn returns true.",
+          kafkaSourceDescriptor.getTopicPartition(),
+          threadId);
       return ProcessContinuation.stop();
     }
     Map<String, Object> updatedConsumerConfig =
@@ -435,8 +472,16 @@ abstract class ReadFromKafkaDoFn<K, V>
     LOG.info(
         "Creating Kafka consumer for process continuation for {}",
         kafkaSourceDescriptor.getTopicPartition());
+    Instant now = Instant.now();
     try (Consumer<byte[], byte[]> consumer = consumerFactoryFn.apply(updatedConsumerConfig)) {
+      LOG.info(
+          "bzablockilog {} {} Starting kafka consumer takes {}ms",
+          kafkaSourceDescriptor.getTopicPartition(),
+          threadId,
+          new Duration(now.getMillis(), Instant.now().getMillis()).getMillis());
       // Check whether current TopicPartition is still available to read.
+
+      now = Instant.now();
       Set<TopicPartition> existingTopicPartitions = new HashSet<>();
       for (List<PartitionInfo> topicPartitionList : consumer.listTopics().values()) {
         topicPartitionList.forEach(
@@ -445,6 +490,11 @@ abstract class ReadFromKafkaDoFn<K, V>
                   new TopicPartition(partitionInfo.topic(), partitionInfo.partition()));
             });
       }
+      LOG.info(
+          "bzablockilog {} {} List topics takes {}ms",
+          kafkaSourceDescriptor.getTopicPartition(),
+          threadId,
+          new Duration(now.getMillis(), Instant.now().getMillis()).getMillis());
       if (!existingTopicPartitions.contains(kafkaSourceDescriptor.getTopicPartition())) {
         return ProcessContinuation.stop();
       }
@@ -453,22 +503,48 @@ abstract class ReadFromKafkaDoFn<K, V>
           consumer, ImmutableList.of(kafkaSourceDescriptor.getTopicPartition()));
       long startOffset = tracker.currentRestriction().getFrom();
 
+      now = Instant.now();
       long expectedOffset = startOffset;
       consumer.seek(kafkaSourceDescriptor.getTopicPartition(), startOffset);
+      LOG.info(
+          "bzablockilog {} {} consumer.seek takes {}ms",
+          kafkaSourceDescriptor.getTopicPartition(),
+          threadId,
+          new Duration(now.getMillis(), Instant.now().getMillis()).getMillis());
       ConsumerRecords<byte[], byte[]> rawRecords = ConsumerRecords.empty();
 
       while (true) {
+        now = Instant.now();
         rawRecords = poll(consumer, kafkaSourceDescriptor.getTopicPartition());
+        LOG.info(
+            "bzablockilog {} {} poll takes {}ms",
+            kafkaSourceDescriptor.getTopicPartition(),
+            threadId,
+            new Duration(now.getMillis(), Instant.now().getMillis()).getMillis());
+        LOG.info(
+            "bzablockilog {} {} poll return {} records",
+            kafkaSourceDescriptor.getTopicPartition(),
+            threadId,
+            rawRecords.count());
         // When there are no records available for the current TopicPartition, self-checkpoint
         // and move to process the next element.
         if (rawRecords.isEmpty()) {
           if (timestampPolicy != null) {
             updateWatermarkManually(timestampPolicy, watermarkEstimator, tracker);
           }
+          LOG.info(
+              "bzablockilog {} {} ProcessContinuation.resume() rawRecords.isEmpty()",
+              kafkaSourceDescriptor.getTopicPartition(),
+              threadId);
           return ProcessContinuation.resume();
         }
+        Instant nowProcessRawRecords = Instant.now();
         for (ConsumerRecord<byte[], byte[]> rawRecord : rawRecords) {
           if (!tracker.tryClaim(rawRecord.offset())) {
+            LOG.info(
+                "bzablockilog {} {} ProcessContinuation.stop() tracker.tryClaim(rawRecord.offset())==false",
+                kafkaSourceDescriptor.getTopicPartition(),
+                threadId);
             return ProcessContinuation.stop();
           }
           try {
@@ -482,13 +558,27 @@ abstract class ReadFromKafkaDoFn<K, V>
                     ConsumerSpEL.hasHeaders() ? rawRecord.headers() : null,
                     ConsumerSpEL.deserializeKey(keyDeserializerInstance, rawRecord),
                     ConsumerSpEL.deserializeValue(valueDeserializerInstance, rawRecord));
+            // now = Instant.now();
             int recordSize =
                 (rawRecord.key() == null ? 0 : rawRecord.key().length)
                     + (rawRecord.value() == null ? 0 : rawRecord.value().length);
             avgRecordSize
                 .getUnchecked(kafkaSourceDescriptor.getTopicPartition())
                 .update(recordSize, rawRecord.offset() - expectedOffset);
+            // if(i>480 && i<495) {
+            //   LOG.info(
+            //       "bzablockilog {} {} {}, avgRecordSize.update takes {}ms",
+            //       kafkaSourceDescriptor.getTopicPartition(), i,
+            //       new Duration(now.getMillis(), Instant.now().getMillis()).getMillis());
+            // }
+            // now = Instant.now();
             rawSizes.update(recordSize);
+            // if(i>480 && i<495) {
+            //   LOG.info(
+            //       "bzablockilog {} {} {}, rawSizes.update takes {}ms",
+            //       kafkaSourceDescriptor.getTopicPartition(), i,
+            //       new Duration(now.getMillis(), Instant.now().getMillis()).getMillis());
+            // }
             expectedOffset = rawRecord.offset() + 1;
             Instant outputTimestamp;
             // The outputTimestamp and watermark will be computed by timestampPolicy, where the
@@ -518,6 +608,11 @@ abstract class ReadFromKafkaDoFn<K, V>
             }
           }
         }
+        LOG.info(
+            "bzablockilog {} {} process all records takes {}ms",
+            kafkaSourceDescriptor.getTopicPartition(),
+            threadId,
+            new Duration(nowProcessRawRecords.getMillis(), Instant.now().getMillis()).getMillis());
       }
     }
   }
@@ -537,6 +632,11 @@ abstract class ReadFromKafkaDoFn<K, V>
       }
       if (previousPosition == (previousPosition = consumer.position(topicPartition))) {
         // there was no progress on the offset/position, which indicates end of stream
+        LOG.info(
+            "bzablockilog {} {} no progress on the offset/position. return {} records.",
+            topicPartition,
+            Thread.currentThread().getId(),
+            rawRecords.count());
         return rawRecords;
       }
       elapsed = sw.elapsed();
@@ -554,12 +654,16 @@ abstract class ReadFromKafkaDoFn<K, V>
       TimestampPolicy<K, V> timestampPolicy,
       WatermarkEstimator<Instant> watermarkEstimator,
       RestrictionTracker<OffsetRange, Long> tracker) {
+    // Instant now = Instant.now();
     checkState(watermarkEstimator instanceof ManualWatermarkEstimator);
     TimestampPolicyContext context =
         new TimestampPolicyContext(
             (long) ((HasProgress) tracker).getProgress().getWorkRemaining(), Instant.now());
     ((ManualWatermarkEstimator<Instant>) watermarkEstimator)
         .setWatermark(ensureTimestampWithinBounds(timestampPolicy.getWatermark(context)));
+    // LOG.info(
+    //     "bzablockilog updateWatermarkManually takes {}ms",
+    //     new Duration(now.getMillis(), Instant.now().getMillis()).getMillis());
     return context;
   }
 
