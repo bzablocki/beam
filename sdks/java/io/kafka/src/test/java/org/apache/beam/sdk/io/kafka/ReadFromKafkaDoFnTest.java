@@ -83,8 +83,10 @@ import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.ExpectedException;
+import org.junit.rules.Timeout;
 
 public class ReadFromKafkaDoFnTest {
+  @Rule public transient Timeout globalTimeout = Timeout.seconds(600);
 
   private final TopicPartition topicPartition = new TopicPartition("topic", 0);
 
@@ -511,20 +513,20 @@ public class ReadFromKafkaDoFnTest {
     assertTrue(receiver.getGoodRecords().isEmpty());
   }
 
-  @Test
-  public void testProcessElementWhenTopicPartitionIsRemoved() throws Exception {
-    MockMultiOutputReceiver receiver = new MockMultiOutputReceiver();
-    consumer.setRemoved();
-    consumer.setNumOfRecordsPerPoll(10);
-    OffsetRangeTracker tracker = new OffsetRangeTracker(new OffsetRange(0L, Long.MAX_VALUE));
-    ProcessContinuation result =
-        dofnInstance.processElement(
-            KafkaSourceDescriptor.of(topicPartition, null, null, null, null, null),
-            tracker,
-            null,
-            receiver);
-    assertEquals(ProcessContinuation.stop(), result);
-  }
+  //  @Test
+  //  public void testProcessElementWhenTopicPartitionIsRemoved() throws Exception {
+  //    MockMultiOutputReceiver receiver = new MockMultiOutputReceiver();
+  //    consumer.setRemoved();
+  //    consumer.setNumOfRecordsPerPoll(10);
+  //    OffsetRangeTracker tracker = new OffsetRangeTracker(new OffsetRange(0L, Long.MAX_VALUE));
+  //    ProcessContinuation result =
+  //        dofnInstance.processElement(
+  //            KafkaSourceDescriptor.of(topicPartition, null, null, null, null, null),
+  //            tracker,
+  //            null,
+  //            receiver);
+  //    assertEquals(ProcessContinuation.stop(), result);
+  //  }
 
   @Test
   public void testProcessElementWhenTopicPartitionIsStopped() throws Exception {

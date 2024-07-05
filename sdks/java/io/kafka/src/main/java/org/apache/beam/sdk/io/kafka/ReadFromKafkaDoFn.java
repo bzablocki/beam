@@ -21,14 +21,10 @@ import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Pr
 
 import java.time.Duration;
 import java.util.HashMap;
-import java.util.HashSet;
-import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.Set;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import org.apache.beam.model.fnexecution.v1.BeamFnApi;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.io.kafka.KafkaIO.ReadSourceDescriptors;
 import org.apache.beam.sdk.io.kafka.KafkaIOUtils.MovingAvg;
@@ -59,12 +55,10 @@ import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.cache.CacheLoa
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.cache.LoadingCache;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.io.Closeables;
-import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.util.concurrent.ThreadFactoryBuilder;
 import org.apache.kafka.clients.consumer.Consumer;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
-import org.apache.kafka.common.PartitionInfo;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.errors.SerializationException;
 import org.apache.kafka.common.serialization.Deserializer;
@@ -104,11 +98,10 @@ import org.slf4j.LoggerFactory;
  * <h4>Checkpoint and Resume Processing</h4>
  *
  * <p>There are 2 types of checkpoint here: self-checkpoint which invokes by the DoFn and
- * system-checkpoint which is issued by the runner via {@link
- * org.apache.beam.model.fnexecution.v1.BeamFnApi.ProcessBundleSplitRequest}. Every time the
- * consumer gets empty response from {@link Consumer#poll(Duration)}, {@link ReadFromKafkaDoFn} will
- * checkpoint the current {@link KafkaSourceDescriptor} and move to process the next element. These
- * deferred elements will be resumed by the runner as soon as possible.
+ * system-checkpoint which is issued by the runner via {@link BeamFnApi.ProcessBundleSplitRequest}.
+ * Every time the consumer gets empty response from {@link Consumer#poll(Duration)}, {@link
+ * ReadFromKafkaDoFn} will checkpoint the current {@link KafkaSourceDescriptor} and move to process
+ * the next element. These deferred elements will be resumed by the runner as soon as possible.
  *
  * <h4>Progress and Size</h4>
  *
@@ -219,6 +212,9 @@ abstract class ReadFromKafkaDoFn<K, V>
   private final BadRecordRouter badRecordRouter;
 
   private final TupleTag<KV<KafkaSourceDescriptor, KafkaRecord<K, V>>> recordTag;
+
+  private static final Supplier<KafkaConsumerPollThreadCache> cache =
+      Suppliers.memoize(KafkaConsumerPollThreadCache::new);
 
   // Valid between bundle start and bundle finish.
   private transient @Nullable Deserializer<K> keyDeserializerInstance = null;
@@ -435,39 +431,15 @@ abstract class ReadFromKafkaDoFn<K, V>
               kafkaSourceDescriptor.getTopicPartition(),
               Optional.ofNullable(watermarkEstimator.currentWatermark()));
     }
-
-    LOG.info(
-        "Creating Kafka consumer for process continuation for {}",
-        kafkaSourceDescriptor.getTopicPartition());
-    try (Consumer<byte[], byte[]> consumer = consumerFactoryFn.apply(updatedConsumerConfig)) {
-      // Check whether current TopicPartition is still available to read.
-      Set<TopicPartition> existingTopicPartitions = new HashSet<>();
-      for (List<PartitionInfo> topicPartitionList : consumer.listTopics().values()) {
-        topicPartitionList.forEach(
-            partitionInfo ->
-                existingTopicPartitions.add(
-                    new TopicPartition(partitionInfo.topic(), partitionInfo.partition())));
-      }
-      if (!existingTopicPartitions.contains(kafkaSourceDescriptor.getTopicPartition())) {
-        return ProcessContinuation.stop();
-      }
-
-      ConsumerSpEL.evaluateAssign(
-          consumer, ImmutableList.of(kafkaSourceDescriptor.getTopicPartition()));
-      long startOffset = tracker.currentRestriction().getFrom();
-
-      long expectedOffset = startOffset;
-      consumer.seek(kafkaSourceDescriptor.getTopicPartition(), startOffset);
-
-      KafkaConsumerPollThread pollThread = new KafkaConsumerPollThread();
-      ExecutorService backgroundThread =
-          Executors.newSingleThreadExecutor(
-              new ThreadFactoryBuilder()
-                  .setDaemon(true)
-                  .setNameFormat("KafkaConsumerPoll-thread")
-                  .build());
-      pollThread.startOnExecutor(backgroundThread, consumer);
-
+    final long startOffset = tracker.currentRestriction().getFrom();
+    long resumeOffset = startOffset;
+    @Nullable KafkaConsumerPollThread pollThread = null;
+    try {
+      pollThread =
+          cache
+              .get()
+              .acquireConsumer(
+                  updatedConsumerConfig, consumerFactoryFn, kafkaSourceDescriptor, startOffset);
       while (true) {
         ConsumerRecords<byte[], byte[]> rawRecords = pollThread.readRecords();
         // When there are no records available for the current TopicPartition, self-checkpoint
@@ -480,6 +452,7 @@ abstract class ReadFromKafkaDoFn<K, V>
         }
         for (ConsumerRecord<byte[], byte[]> rawRecord : rawRecords) {
           if (!tracker.tryClaim(rawRecord.offset())) {
+            // XXX need to add unconsumed records back.
             return ProcessContinuation.stop();
           }
           try {
@@ -498,9 +471,9 @@ abstract class ReadFromKafkaDoFn<K, V>
                     + (rawRecord.value() == null ? 0 : rawRecord.value().length);
             avgRecordSize
                 .getUnchecked(kafkaSourceDescriptor.getTopicPartition())
-                .update(recordSize, rawRecord.offset() - expectedOffset);
+                .update(recordSize, rawRecord.offset() - resumeOffset);
             rawSizes.update(recordSize);
-            expectedOffset = rawRecord.offset() + 1;
+            resumeOffset = rawRecord.offset() + 1;
             Instant outputTimestamp;
             // The outputTimestamp and watermark will be computed by timestampPolicy, where the
             // WatermarkEstimator should be a manual one.
@@ -529,6 +502,17 @@ abstract class ReadFromKafkaDoFn<K, V>
             }
           }
         }
+      }
+    } finally {
+      if (pollThread != null) {
+        cache
+            .get()
+            .releaseConsumer(
+                updatedConsumerConfig,
+                consumerFactoryFn,
+                kafkaSourceDescriptor,
+                pollThread,
+                resumeOffset);
       }
     }
   }
