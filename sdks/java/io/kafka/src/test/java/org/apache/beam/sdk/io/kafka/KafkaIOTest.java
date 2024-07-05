@@ -117,12 +117,7 @@ import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Immuta
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableMap;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Lists;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.util.concurrent.Uninterruptibles;
-import org.apache.kafka.clients.consumer.Consumer;
-import org.apache.kafka.clients.consumer.ConsumerConfig;
-import org.apache.kafka.clients.consumer.ConsumerRecord;
-import org.apache.kafka.clients.consumer.MockConsumer;
-import org.apache.kafka.clients.consumer.OffsetAndTimestamp;
-import org.apache.kafka.clients.consumer.OffsetResetStrategy;
+import org.apache.kafka.clients.consumer.*;
 import org.apache.kafka.clients.producer.MockProducer;
 import org.apache.kafka.clients.producer.Producer;
 import org.apache.kafka.clients.producer.ProducerConfig;
@@ -154,6 +149,7 @@ import org.junit.Ignore;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.ExpectedException;
+import org.junit.rules.Timeout;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 import org.slf4j.Logger;
@@ -165,7 +161,7 @@ import org.slf4j.LoggerFactory;
  */
 @RunWith(JUnit4.class)
 public class KafkaIOTest {
-
+  @Rule public transient Timeout globalTimeout = Timeout.seconds(600);
   private static final Logger LOG = LoggerFactory.getLogger(KafkaIOTest.class);
 
   /*
@@ -181,7 +177,7 @@ public class KafkaIOTest {
   @Rule public ExpectedException thrown = ExpectedException.none();
 
   @Rule
-  public ExpectedLogs unboundedReaderExpectedLogs = ExpectedLogs.none(KafkaUnboundedReader.class);
+  public ExpectedLogs pollThreadExpectedLogs = ExpectedLogs.none(KafkaConsumerPollThread.class);
 
   @Rule public ExpectedLogs kafkaIOExpectedLogs = ExpectedLogs.none(KafkaIO.class);
 
@@ -1423,7 +1419,7 @@ public class KafkaIOTest {
   }
 
   @Test
-  public void testUnboundedReaderLogsCommitFailure() throws Exception {
+  public void testUnboundedReaderLogsFetchFailure() throws Exception {
 
     List<String> topics = ImmutableList.of("topic_a");
 
@@ -1440,9 +1436,12 @@ public class KafkaIOTest {
 
     UnboundedReader<KafkaRecord<Integer, Long>> reader = source.createReader(null, null);
 
-    reader.start();
-
-    unboundedReaderExpectedLogs.verifyWarn("exception while fetching latest offset for partition");
+    try {
+      reader.start();
+    } catch (Exception e) {
+      // Racy if we observe the exception on initial advance.
+    }
+    pollThreadExpectedLogs.verifyError("Exception while reading from Kafka");
 
     reader.close();
   }
