@@ -91,7 +91,7 @@ public abstract class MockSessionService extends SessionService {
   public void connect() {}
 
   @Override
-  public JCSMPProperties initializeSessionProperties(JCSMPProperties baseProperties) {
+  public JCSMPProperties getSessionProperties(JCSMPProperties baseProperties) {
     // Let's override some properties that will be overriden by the connector
     // Opposite of the mode, to test that is overriden
     baseProperties.setProperty(

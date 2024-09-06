@@ -80,6 +80,7 @@ public class SolaceIOMultipleSempIT {
     solaceContainerManager = new SolaceContainerManager();
     solaceContainerManager.start();
     solaceContainerManager.createQueueWithSubscriptionTopic(QUEUE_NAME);
+    System.out.printf("container manager jcsmp port: %d\n", solaceContainerManager.jcsmpPortMapped);
   }
 
   @AfterClass
@@ -99,14 +100,14 @@ public class SolaceIOMultipleSempIT {
    */
   @Test
   public void test01writeAndReadWithMultipleSempClientFactory() {
-    Pipeline writerPipeline =
-        createWriterPipeline(WriterType.BATCHED, solaceContainerManager.jcsmpPortMapped);
+    Pipeline writerPipeline = createWriterPipeline(WriterType.BATCHED);
     writerPipeline
         .apply(
             "Read from Solace",
             SolaceIO.read()
                 .from(Queue.fromName(QUEUE_NAME))
                 .withMaxNumConnections(1)
+                .withDeduplicateRecords(true)
                 .withSempClientFactory(
                     BasicAuthMultipleSempClientFactory.builder()
                         .backlogHosts(
@@ -137,14 +138,13 @@ public class SolaceIOMultipleSempIT {
     assertEquals(PUBLISH_MESSAGE_COUNT, actualRecordsCount);
   }
 
-  private Pipeline createWriterPipeline(
-      SolaceIO.WriterType writerType, int solaceContainerJcsmpPort) {
+  private Pipeline createWriterPipeline(SolaceIO.WriterType writerType) {
     TestStream.Builder<KV<String, String>> kvBuilder =
         TestStream.create(KvCoder.of(AvroCoder.of(String.class), AvroCoder.of(String.class)))
             .advanceWatermarkTo(Instant.EPOCH);
 
     for (int i = 0; i < PUBLISH_MESSAGE_COUNT; i++) {
-      String key = "Solace-Message-ID:m" + solaceContainerJcsmpPort + i;
+      String key = "Solace-Message-ID:m" + i;
       String payload = String.format("{\"field_str\":\"value\",\"field_int\":123%d}", i);
       kvBuilder =
           kvBuilder
@@ -175,7 +175,7 @@ public class SolaceIOMultipleSempIT {
                 .withMaxNumOfUsedWorkers(1)
                 .withSessionServiceFactory(
                     BasicAuthJcsmpSessionServiceFactory.builder()
-                        .host("localhost:" + solaceContainerJcsmpPort)
+                        .host("localhost:" + solaceContainerManager.jcsmpPortMapped)
                         .username(SolaceContainerManager.USERNAME)
                         .password(SolaceContainerManager.PASSWORD)
                         .vpnName(SolaceContainerManager.VPN_NAME)

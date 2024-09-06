@@ -29,8 +29,8 @@ import org.slf4j.LoggerFactory;
  * messaging system. It allows for establishing a connection, creating a message-receiver object,
  * checking if the connection is closed or not, and gracefully closing the session.
  *
- * <p>Override this class and the method {@link #initializeSessionProperties(JCSMPProperties)} with
- * your specific properties, including all those related to authentication.
+ * <p>Override this class and the method {@link #getSessionProperties(JCSMPProperties)} with your
+ * specific properties, including all those related to authentication.
  *
  * <p>The connector will call the method only once per session created, so you can perform
  * relatively heavy operations in that method (e.g. connect to a store or vault to retrieve
@@ -67,8 +67,7 @@ import org.slf4j.LoggerFactory;
  * <p>The connector ensures that no two threads will be calling that method at the same time, so you
  * don't have to take any specific precautions to avoid race conditions.
  *
- * <p>For basic authentication, use {@link BasicAuthJcsmpSessionService} and {@link
- * BasicAuthJcsmpSessionServiceFactory}.
+ * <p>For basic authentication, use {@link BasicAuthJcsmpSessionServiceFactory}.
  *
  * <p>For other situations, you need to extend this class and implement the `equals` method, so two
  * instances of your class can be compared by value. We recommend using AutoValue for that. For
@@ -157,7 +156,7 @@ public abstract class SessionService implements Serializable {
    *       href="https://docs.solace.com/API-Developer-Online-Ref-Documentation/java/com/solacesystems/jcsmp/JCSMPProperties.html">https://docs.solace.com/API-Developer-Online-Ref-Documentation/java/com/solacesystems/jcsmp/JCSMPProperties.html</a>
    * </ul>
    */
-  public abstract JCSMPProperties initializeSessionProperties(JCSMPProperties baseProperties);
+  public abstract JCSMPProperties getSessionProperties(JCSMPProperties baseProperties);
 
   /**
    * You need to override this method to be able to compare these objects by value. We recommend
@@ -184,7 +183,7 @@ public abstract class SessionService implements Serializable {
    * token), this method will be called again.
    */
   public final JCSMPProperties initializeWriteSessionProperties(SolaceIO.SubmissionMode mode) {
-    JCSMPProperties jcsmpProperties = initializeSessionProperties(getDefaultProperties());
+    JCSMPProperties jcsmpProperties = getSessionProperties(getDefaultProperties());
     return overrideConnectorProperties(jcsmpProperties, mode);
   }
 

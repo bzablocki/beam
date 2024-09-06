@@ -19,6 +19,7 @@ package org.apache.beam.sdk.io.solace.broker;
 
 import com.solacesystems.jcsmp.Queue;
 import java.io.Serializable;
+import org.apache.beam.sdk.io.solace.data.Solace;
 import org.checkerframework.checker.nullness.qual.Nullable;
 
 /**
@@ -57,13 +58,40 @@ public abstract class SessionServiceFactory implements Serializable {
    * This could be used to associate the created SessionService with a specific queue for message
    * handling.
    */
-  @Nullable Queue queue;
+  private @Nullable Queue queue;
 
   /**
    * This is the core method that subclasses must implement. It defines how to construct and return
    * a SessionService object.
    */
   public abstract SessionService create();
+
+  /**
+   * Do not override. This method is called in the {@link
+   * org.apache.beam.sdk.io.solace.SolaceIO.Read#expand(org.apache.beam.sdk.values.PBegin)} method
+   * to set the Queue reference based on {@link
+   * org.apache.beam.sdk.io.solace.SolaceIO.Read#from(Solace.Queue)} or {@link
+   * org.apache.beam.sdk.io.solace.SolaceIO.Read#from(Solace.Topic)}. The queue can be retrieved in
+   * the classes that inherit {@link SessionServiceFactory} with the getter method {@link
+   * SessionServiceFactory#getQueue()}
+   */
+  public final void setQueue(Queue queue) {
+    this.queue = queue;
+  }
+
+  /**
+   * Getter for the queue. Do not override. This is nullable, because at the construction time this
+   * reference is null. Once the pipeline is compiled and the {@link
+   * org.apache.beam.sdk.io.solace.SolaceIO.Read#expand(org.apache.beam.sdk.values.PBegin)} method
+   * is called, this reference is valid.
+   *
+   * @return a reference to the queue which is set with the {@link
+   *     org.apache.beam.sdk.io.solace.SolaceIO.Read#from(Solace.Queue)} or {@link
+   *     org.apache.beam.sdk.io.solace.SolaceIO.Read#from(Solace.Topic)}
+   */
+  public final @Nullable Queue getQueue() {
+    return queue;
+  }
 
   /**
    * You need to override this method to be able to compare these objects by value. We recommend
@@ -78,12 +106,4 @@ public abstract class SessionServiceFactory implements Serializable {
    */
   @Override
   public abstract int hashCode();
-  /**
-   * This method is called in the {@link
-   * org.apache.beam.sdk.io.solace.SolaceIO.Read#expand(org.apache.beam.sdk.values.PBegin)} method
-   * to set the Queue reference.
-   */
-  public void setQueue(Queue queue) {
-    this.queue = queue;
-  }
 }

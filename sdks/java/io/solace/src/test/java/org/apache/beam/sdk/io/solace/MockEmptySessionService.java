@@ -58,7 +58,7 @@ public abstract class MockEmptySessionService extends SessionService {
   }
 
   @Override
-  public JCSMPProperties initializeSessionProperties(JCSMPProperties baseProperties) {
+  public JCSMPProperties getSessionProperties(JCSMPProperties baseProperties) {
     throw new UnsupportedOperationException(exceptionMessage);
   }
 }

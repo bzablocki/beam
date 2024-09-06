@@ -37,48 +37,26 @@ import javax.annotation.Nullable;
 import org.apache.beam.sdk.io.solace.RetryCallableManager;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableSet;
 
-/**
- * A class that manages a connection to a Solace broker using basic authentication.
- *
- * <p>This class provides a way to connect to a Solace broker and receive messages from a queue. The
- * connection is established using basic authentication.
- */
 @AutoValue
-public abstract class BasicAuthJcsmpSessionService extends SessionService {
+public abstract class JcsmpSessionService extends SessionService {
+  abstract JCSMPProperties jcsmpProperties();
+
   /** The name of the queue to receive messages from. */
-  public abstract @Nullable String queueName();
-  /** The host name or IP address of the Solace broker. Format: Host[:Port] */
-  public abstract String host();
-  /** The username to use for authentication. */
-  public abstract String username();
-  /** The password to use for authentication. */
-  public abstract String password();
-  /** The name of the VPN to connect to. */
-  public abstract String vpnName();
-
-  public static Builder builder() {
-    return new AutoValue_BasicAuthJcsmpSessionService.Builder().vpnName(DEFAULT_VPN_NAME);
-  }
-
-  @AutoValue.Builder
-  public abstract static class Builder {
-    public abstract Builder queueName(@Nullable String q);
-
-    public abstract Builder host(String host);
-
-    public abstract Builder username(String username);
-
-    public abstract Builder password(String password);
-
-    public abstract Builder vpnName(String vpnName);
-
-    public abstract BasicAuthJcsmpSessionService build();
-  }
+  abstract @Nullable Queue queue();
 
   @Nullable private JCSMPSession jcsmpSession;
   @Nullable private MessageReceiver messageReceiver;
   @Nullable private MessageProducer messageProducer;
   private final RetryCallableManager retryCallableManager = RetryCallableManager.create();
+
+  public static JcsmpSessionService create(JCSMPProperties jcsmpProperties, @Nullable Queue queue) {
+    return new AutoValue_JcsmpSessionService(jcsmpProperties, queue);
+  }
+
+  @Override
+  public JCSMPProperties getSessionProperties(JCSMPProperties baseProps) {
+    return jcsmpProperties();
+  }
 
   @Override
   public void connect() {
@@ -149,10 +127,9 @@ public abstract class BasicAuthJcsmpSessionService extends SessionService {
     if (isClosed()) {
       connectSession();
     }
+    Queue queueNotNull = checkStateNotNull(queue(), "SolaceIO.Read: Queue is not set.");
 
-    Queue queue =
-        JCSMPFactory.onlyInstance()
-            .createQueue(checkStateNotNull(queueName(), "SolaceIO.Read: Queue is not set."));
+    Queue queue = JCSMPFactory.onlyInstance().createQueue(queueNotNull.getName());
 
     ConsumerFlowProperties flowProperties = new ConsumerFlowProperties();
     flowProperties.setEndpoint(queue);
@@ -189,19 +166,6 @@ public abstract class BasicAuthJcsmpSessionService extends SessionService {
   }
 
   private JCSMPSession createSessionObject() throws InvalidPropertiesException {
-    JCSMPProperties properties = initializeSessionProperties(new JCSMPProperties());
-    return JCSMPFactory.onlyInstance().createSession(properties);
-  }
-
-  @Override
-  public JCSMPProperties initializeSessionProperties(JCSMPProperties baseProps) {
-    baseProps.setProperty(JCSMPProperties.VPN_NAME, vpnName());
-
-    baseProps.setProperty(
-        JCSMPProperties.AUTHENTICATION_SCHEME, JCSMPProperties.AUTHENTICATION_SCHEME_BASIC);
-    baseProps.setProperty(JCSMPProperties.USERNAME, username());
-    baseProps.setProperty(JCSMPProperties.PASSWORD, password());
-    baseProps.setProperty(JCSMPProperties.HOST, host());
-    return baseProps;
+    return JCSMPFactory.onlyInstance().createSession(jcsmpProperties());
   }
 }
