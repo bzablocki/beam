@@ -24,9 +24,6 @@ import java.time.Duration;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
-import java.util.Set;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.TimeUnit;
 import org.apache.beam.model.fnexecution.v1.BeamFnApi;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.io.kafka.KafkaIO.ReadSourceDescriptors;
@@ -53,22 +50,17 @@ import org.apache.beam.sdk.values.TupleTag;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.annotations.VisibleForTesting;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Supplier;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Suppliers;
-import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.cache.Cache;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.cache.CacheBuilder;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.cache.CacheLoader;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.cache.LoadingCache;
-import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.cache.RemovalCause;
-import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.cache.RemovalNotification;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.io.Closeables;
 import org.apache.kafka.clients.consumer.Consumer;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
-import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.errors.SerializationException;
-import org.apache.kafka.common.internals.Topic;
 import org.apache.kafka.common.serialization.Deserializer;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.joda.time.Instant;
@@ -76,9 +68,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * A SplittableDoFn which reads from {@link KafkaSourceDescriptor} and outputs pair of
- * {@link KafkaSourceDescriptor} and {@link KafkaRecord}. By default, a
- * {@link MonotonicallyIncreasing} watermark estimator is used to track watermark.
+ * A SplittableDoFn which reads from {@link KafkaSourceDescriptor} and outputs pair of {@link
+ * KafkaSourceDescriptor} and {@link KafkaRecord}. By default, a {@link MonotonicallyIncreasing}
+ * watermark estimator is used to track watermark.
  *
  * <p>{@link ReadFromKafkaDoFn} implements the logic of reading from Kafka. The element is a {@link
  * KafkaSourceDescriptor}, and the restriction is an {@link OffsetRange} which represents record
@@ -225,8 +217,8 @@ abstract class ReadFromKafkaDoFn<K, V>
 
   private static final Supplier<KafkaConsumerPollThreadCache> cache =
       Suppliers.memoize(KafkaConsumerPollThreadCache::new);
-  private static final Supplier<KafkaOffsetConsumerPollCache> offsetCache =
-      Suppliers.memoize(KafkaOffsetConsumerPollCache::new);
+  private static final Supplier<KafkaOffsetConsumerPollThreadCache> offsetCache =
+      Suppliers.memoize(KafkaOffsetConsumerPollThreadCache::new);
 
   // Valid between bundle start and bundle finish.
   private transient @Nullable Deserializer<K> keyDeserializerInstance = null;
@@ -238,16 +230,11 @@ abstract class ReadFromKafkaDoFn<K, V>
 
   private final HashMap<String, Long> perPartitionBacklogMetrics = new HashMap<>();
 
-  @VisibleForTesting
-  final long consumerPollingTimeout;
-  @VisibleForTesting
-  final DeserializerProvider<K> keyDeserializerProvider;
-  @VisibleForTesting
-  final DeserializerProvider<V> valueDeserializerProvider;
-  @VisibleForTesting
-  final Map<String, Object> consumerConfig;
-  @VisibleForTesting
-  static final String METRIC_NAMESPACE = KafkaUnboundedReader.METRIC_NAMESPACE;
+  @VisibleForTesting final long consumerPollingTimeout;
+  @VisibleForTesting final DeserializerProvider<K> keyDeserializerProvider;
+  @VisibleForTesting final DeserializerProvider<V> valueDeserializerProvider;
+  @VisibleForTesting final Map<String, Object> consumerConfig;
+  @VisibleForTesting static final String METRIC_NAMESPACE = KafkaUnboundedReader.METRIC_NAMESPACE;
 
   @VisibleForTesting
   static final String RAW_SIZE_METRIC_PREFIX = KafkaUnboundedReader.RAW_SIZE_METRIC_PREFIX;
@@ -259,41 +246,41 @@ abstract class ReadFromKafkaDoFn<K, V>
   private static class KafkaLatestOffsetEstimator
       implements GrowableOffsetRangeTracker.RangeEndEstimator {
 
-    private final Consumer<byte[], byte[]> offsetConsumer;
-    private final TopicPartition topicPartition;
-    private final Supplier<Long> memoizedBacklog;
-    private boolean closed;
+    private final KafkaOffsetConsumerPollThread kafkaOffsetConsumerPollThread;
+    private final KafkaSourceDescriptor kafkaSourceDescriptor;
+    private boolean closed = false;
 
-    KafkaLatestOffsetEstimator(
-        Consumer<byte[], byte[]> offsetConsumer, TopicPartition topicPartition) {
-      this.offsetConsumer = offsetConsumer;
-      this.topicPartition = topicPartition;
-
-      memoizedBacklog =
-          Suppliers.memoizeWithExpiration(
-              () -> {
-                synchronized (offsetConsumer) {
-                  return offsetConsumer.endOffsets(ImmutableList.of(topicPartition)).getOrDefault(topicPartition, -1L); //todo throw error when unavailable
-                }
-              },
-              1,
-              TimeUnit.SECONDS);
+    public KafkaLatestOffsetEstimator(
+        Map<String, Object> offsetConsumerConfig1,
+        SerializableFunction<Map<String, Object>, Consumer<byte[], byte[]>> consumerFactoryFn,
+        KafkaSourceDescriptor kafkaSourceDescriptor) {
+      this.kafkaSourceDescriptor = kafkaSourceDescriptor;
+      this.kafkaOffsetConsumerPollThread =
+          offsetCache
+              .get()
+              .acquireOffsetTrackerConsumer(
+                  offsetConsumerConfig1, consumerFactoryFn, kafkaSourceDescriptor);
     }
 
     @Override
     protected void finalize() {
       try {
+        // todo do we need any action to close it?
         // Closeables.close(offsetConsumer, true);
-        // closed = true;
-        LOG.info("Offset Estimator consumer was closed for {}", topicPartition);
+        closed = true;
+        LOG.info(
+            "bzablockilogkafka Offset Estimator consumer was closed for {}",
+            kafkaSourceDescriptor.getTopicPartition());
       } catch (Exception anyException) {
-        LOG.warn("Failed to close offset consumer for {}", topicPartition);
+        LOG.warn(
+            "bzablockilogkafka Failed to close offset consumer for {}",
+            kafkaSourceDescriptor.getTopicPartition());
       }
     }
 
     @Override
     public long estimate() {
-      return memoizedBacklog.get();
+      return kafkaOffsetConsumerPollThread.readEndOffset();
     }
 
     public boolean isClosed() {
@@ -393,19 +380,18 @@ abstract class ReadFromKafkaDoFn<K, V>
 
       // LOG.info("Creating Kafka consumer for offset estimation for {}", topicPartition);
 
-      Map<String, Object> offsetConsumerConfig1 = KafkaIOUtils.getOffsetConsumerConfig(
-          "tracker-" + topicPartition, offsetConsumerConfig, updatedConsumerConfig);
+      Map<String, Object> offsetConsumerConfig1 =
+          KafkaIOUtils.getOffsetConsumerConfig(
+              "tracker-" + topicPartition, offsetConsumerConfig, updatedConsumerConfig);
 
-      Consumer<byte[], byte[]> offsetConsumer = offsetCache.get()
-          .acquireOffsetTrackerConsumer(offsetConsumerConfig1, consumerFactoryFn,
-              kafkaSourceDescriptor);
-
-      offsetEstimator = new KafkaLatestOffsetEstimator(offsetConsumer, topicPartition);
+      offsetEstimator =
+          new KafkaLatestOffsetEstimator(
+              offsetConsumerConfig1, consumerFactoryFn, kafkaSourceDescriptor);
       // offsetEstimator = new KafkaLatestOffsetEstimator(offsetConsumer, topicPartition);
       // offsetEstimatorCacheInstance.put(topicPartition, offsetEstimator);
     }
 
-      return new GrowableOffsetRangeTracker(restriction.getFrom(), offsetEstimator);
+    return new GrowableOffsetRangeTracker(restriction.getFrom(), offsetEstimator);
   }
 
   @ProcessElement
@@ -591,8 +577,7 @@ abstract class ReadFromKafkaDoFn<K, V>
     }
 
     LOG.info("bzablockilogkafka teardown offsetEstimatorCache");
-    if (offsetEstimatorCache != null) {
-      checkNotNull(offsetEstimatorCache).values().forEach(k -> k.offsetConsumer.close());
+    if (offsetEstimatorCache != null) { // todo do we need it here?
       checkNotNull(offsetEstimatorCache).clear();
     }
     if (checkStopReadingFn != null) {
