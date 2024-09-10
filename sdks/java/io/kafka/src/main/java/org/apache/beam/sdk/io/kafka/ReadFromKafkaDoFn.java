@@ -591,7 +591,7 @@ abstract class ReadFromKafkaDoFn<K, V>
     offsetEstimatorCache =
         CacheBuilder.newBuilder()
             .maximumSize(1000L)
-            .expireAfterAccess(1, TimeUnit.SECONDS)
+            .expireAfterAccess(5, TimeUnit.MINUTES)
             .removalListener(
                 (RemovalNotification<TopicPartition, KafkaLatestOffsetEstimator> listener) -> {
                   if (listener.getValue() != null) {
