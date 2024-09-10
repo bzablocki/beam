@@ -21,8 +21,11 @@ import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Pr
 
 import java.time.Duration;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import org.apache.beam.model.fnexecution.v1.BeamFnApi;
 import org.apache.beam.sdk.coders.Coder;
@@ -59,6 +62,7 @@ import org.apache.kafka.clients.consumer.Consumer;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
+import org.apache.kafka.common.PartitionInfo;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.errors.SerializationException;
 import org.apache.kafka.common.serialization.Deserializer;
@@ -446,7 +450,7 @@ abstract class ReadFromKafkaDoFn<K, V>
         // and move to process the next element.
         if (rawRecords.isEmpty()) {
           if (!topicPartitionExists(
-              kafkaSourceDescriptor.getTopicPartition(), consumer.listTopics())) {
+              kafkaSourceDescriptor.getTopicPartition(), pollThread.getTopicsList())) {
             return ProcessContinuation.stop();
           }
           if (timestampPolicy != null) {
