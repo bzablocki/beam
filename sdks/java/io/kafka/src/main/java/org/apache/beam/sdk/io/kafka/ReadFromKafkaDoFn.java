@@ -260,8 +260,10 @@ abstract class ReadFromKafkaDoFn<K, V>
           Suppliers.memoizeWithExpiration(
               () -> {
                 synchronized (offsetConsumer) {
-                  ConsumerSpEL.evaluateSeek2End(offsetConsumer, topicPartition);
-                  return offsetConsumer.position(topicPartition);
+                  // ConsumerSpEL.evaluateSeek2End(offsetConsumer, topicPartition);
+                  return offsetConsumer
+                      .endOffsets(ImmutableList.of(topicPartition))
+                      .getOrDefault(topicPartition, 0L);
                 }
               },
               1,
