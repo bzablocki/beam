@@ -19,9 +19,6 @@ package org.apache.beam.sdk.io.kafka;
 
 import java.io.IOException;
 import java.time.Duration;
-import java.util.List;
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
@@ -37,7 +34,6 @@ import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.io.Closeables;
 import org.apache.kafka.clients.consumer.Consumer;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.consumer.OffsetAndMetadata;
-import org.apache.kafka.common.PartitionInfo;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.errors.WakeupException;
 import org.checkerframework.checker.nullness.qual.Nullable;
@@ -76,7 +72,7 @@ public class KafkaConsumerPollThread {
       new SynchronousQueue<>();
   private final AtomicReference<@Nullable KafkaCheckpointMark> finalizedCheckpointMark =
       new AtomicReference<>();
-  private final Map<String, List<PartitionInfo>> topicsList = new ConcurrentHashMap<>();
+  // private final Map<String, List<PartitionInfo>> topicsList = new ConcurrentHashMap<>();
   private final AtomicBoolean closed = new AtomicBoolean(false);
 
   private static final Logger LOG = LoggerFactory.getLogger(KafkaConsumerPollThread.class);
@@ -144,7 +140,7 @@ public class KafkaConsumerPollThread {
 
           // todo not sure if this should be called in every iteration. It's probably better to
           //  memoize it. but how to make sure we don't access the consumer concurrently?
-          refreshTopicsList(consumer);
+          // refreshTopicsList(consumer);
         } catch (InterruptedException e) {
           LOG.warn("{}: consumer thread is interrupted", this, e); // not expected
           break;
@@ -162,14 +158,14 @@ public class KafkaConsumerPollThread {
     commitCheckpointMark();
   }
 
-  private void refreshTopicsList(Consumer<byte[], byte[]> consumer) {
-    topicsList.clear();
-    topicsList.putAll(consumer.listTopics());
-  }
+  // private void refreshTopicsList(Consumer<byte[], byte[]> consumer) {
+  //   topicsList.clear();
+  //   topicsList.putAll(consumer.listTopics());
+  // }
 
-  public Map<String, List<PartitionInfo>> getTopicsList() {
-    return topicsList;
-  }
+  // public Map<String, List<PartitionInfo>> getTopicsList() {
+  //   return topicsList;
+  // }
 
   ConsumerRecords<byte[], byte[]> readRecords() throws IOException {
     @Nullable ConsumerRecords<byte[], byte[]> records = null;

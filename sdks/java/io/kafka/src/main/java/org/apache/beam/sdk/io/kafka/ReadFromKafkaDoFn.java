@@ -21,11 +21,9 @@ import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Pr
 
 import java.time.Duration;
 import java.util.HashMap;
-import java.util.HashSet;
-import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.Set;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import org.apache.beam.model.fnexecution.v1.BeamFnApi;
 import org.apache.beam.sdk.coders.Coder;
@@ -53,16 +51,17 @@ import org.apache.beam.sdk.values.TupleTag;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.annotations.VisibleForTesting;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Supplier;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Suppliers;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.cache.Cache;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.cache.CacheBuilder;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.cache.CacheLoader;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.cache.LoadingCache;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.cache.RemovalNotification;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.io.Closeables;
 import org.apache.kafka.clients.consumer.Consumer;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
-import org.apache.kafka.common.PartitionInfo;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.errors.SerializationException;
 import org.apache.kafka.common.serialization.Deserializer;
@@ -223,7 +222,8 @@ abstract class ReadFromKafkaDoFn<K, V>
   // Valid between bundle start and bundle finish.
   private transient @Nullable Deserializer<K> keyDeserializerInstance = null;
   private transient @Nullable Deserializer<V> valueDeserializerInstance = null;
-  private transient @Nullable Map<TopicPartition, KafkaLatestOffsetEstimator> offsetEstimatorCache;
+  private transient @Nullable Cache<TopicPartition, KafkaLatestOffsetEstimator>
+      offsetEstimatorCache;
 
   private transient @Nullable LoadingCache<TopicPartition, AverageRecordSize> avgRecordSize;
   private static final long DEFAULT_KAFKA_POLL_TIMEOUT = 2L;
@@ -268,14 +268,13 @@ abstract class ReadFromKafkaDoFn<K, V>
               TimeUnit.SECONDS);
     }
 
-    @Override
-    protected void finalize() {
+    protected void close() {
       try {
         Closeables.close(offsetConsumer, true);
         closed = true;
-        LOG.info("Offset Estimator consumer was closed for {}", topicPartition);
+        LOG.info("bzablockilogkafka Offset Estimator consumer was closed for {}", topicPartition);
       } catch (Exception anyException) {
-        LOG.warn("Failed to close offset consumer for {}", topicPartition);
+        LOG.warn("bzablockilogkafka Failed to close offset consumer for {}", topicPartition);
       }
     }
 
@@ -352,7 +351,7 @@ abstract class ReadFromKafkaDoFn<K, V>
     }
     if (offsetEstimatorCache != null) {
       for (Map.Entry<TopicPartition, KafkaLatestOffsetEstimator> tp :
-          offsetEstimatorCache.entrySet()) {
+          offsetEstimatorCache.asMap().entrySet()) {
         perPartitionBacklogMetrics.put(tp.getKey().toString(), tp.getValue().estimate());
       }
     }
@@ -370,26 +369,40 @@ abstract class ReadFromKafkaDoFn<K, V>
     // OffsetEstimators are cached for each topic-partition because they hold a stateful connection,
     // so we want to minimize the amount of connections that we start and track with Kafka. Another
     // point is that it has a memoized backlog, and this should make that more reusable estimations.
-    final Map<TopicPartition, KafkaLatestOffsetEstimator> offsetEstimatorCacheInstance =
+    final Cache<TopicPartition, KafkaLatestOffsetEstimator> offsetEstimatorCacheInstance =
         Preconditions.checkStateNotNull(this.offsetEstimatorCache);
 
     TopicPartition topicPartition = kafkaSourceDescriptor.getTopicPartition();
-    KafkaLatestOffsetEstimator offsetEstimator = offsetEstimatorCacheInstance.get(topicPartition);
-    if (offsetEstimator == null || offsetEstimator.isClosed()) {
-      Map<String, Object> updatedConsumerConfig =
-          overrideBootstrapServersConfig(consumerConfig, kafkaSourceDescriptor);
+    try {
+      // todo we create a new one every time instead of actually caching and reusing it. Is this
+      // correct?
+      KafkaLatestOffsetEstimator offsetEstimator =
+          offsetEstimatorCacheInstance.get(
+              topicPartition,
+              () -> {
+                Map<String, Object> updatedConsumerConfig =
+                    overrideBootstrapServersConfig(consumerConfig, kafkaSourceDescriptor);
 
-      LOG.info("Creating Kafka consumer for offset estimation for {}", topicPartition);
+                LOG.info("Creating Kafka consumer for offset estimation for {}", topicPartition);
 
-      Consumer<byte[], byte[]> offsetConsumer =
-          consumerFactoryFn.apply(
-              KafkaIOUtils.getOffsetConsumerConfig(
-                  "tracker-" + topicPartition, offsetConsumerConfig, updatedConsumerConfig));
-      offsetEstimator = new KafkaLatestOffsetEstimator(offsetConsumer, topicPartition);
-      offsetEstimatorCacheInstance.put(topicPartition, offsetEstimator);
+                Consumer<byte[], byte[]> offsetConsumer =
+                    consumerFactoryFn.apply(
+                        KafkaIOUtils.getOffsetConsumerConfig(
+                            "tracker-" + topicPartition,
+                            offsetConsumerConfig,
+                            updatedConsumerConfig));
+                return new KafkaLatestOffsetEstimator(offsetConsumer, topicPartition);
+              });
+
+      return new GrowableOffsetRangeTracker(restriction.getFrom(), offsetEstimator);
+    } catch (ExecutionException e) {
+      throw new RuntimeException(e);
     }
+    // if (offsetEstimator == null || offsetEstimator.isClosed()) {
 
-    return new GrowableOffsetRangeTracker(restriction.getFrom(), offsetEstimator);
+    // offsetEstimatorCacheInstance.put(topicPartition, offsetEstimator);
+    // }
+
   }
 
   @ProcessElement
@@ -449,10 +462,10 @@ abstract class ReadFromKafkaDoFn<K, V>
         // When there are no records available for the current TopicPartition, self-checkpoint
         // and move to process the next element.
         if (rawRecords.isEmpty()) {
-          if (!topicPartitionExists(
-              kafkaSourceDescriptor.getTopicPartition(), pollThread.getTopicsList())) {
-            return ProcessContinuation.stop();
-          }
+          // if (!topicPartitionExists(
+          //     kafkaSourceDescriptor.getTopicPartition(), pollThread.getTopicsList())) {
+          //   return ProcessContinuation.stop();
+          // }
           if (timestampPolicy != null) {
             updateWatermarkManually(timestampPolicy, watermarkEstimator, tracker);
           }
@@ -525,22 +538,22 @@ abstract class ReadFromKafkaDoFn<K, V>
     }
   }
 
-  private boolean topicPartitionExists(
-      TopicPartition topicPartition, Map<String, List<PartitionInfo>> topicListMap) {
-    // Check if the current TopicPartition still exists.
-    Set<TopicPartition> existingTopicPartitions = new HashSet<>();
-    for (List<PartitionInfo> topicPartitionList : topicListMap.values()) {
-      topicPartitionList.forEach(
-          partitionInfo -> {
-            existingTopicPartitions.add(
-                new TopicPartition(partitionInfo.topic(), partitionInfo.partition()));
-          });
-    }
-    if (!existingTopicPartitions.contains(topicPartition)) {
-      return false;
-    }
-    return true;
-  }
+  // private boolean topicPartitionExists(
+  //     TopicPartition topicPartition, Map<String, List<PartitionInfo>> topicListMap) {
+  //   // Check if the current TopicPartition still exists.
+  //   Set<TopicPartition> existingTopicPartitions = new HashSet<>();
+  //   for (List<PartitionInfo> topicPartitionList : topicListMap.values()) {
+  //     topicPartitionList.forEach(
+  //         partitionInfo -> {
+  //           existingTopicPartitions.add(
+  //               new TopicPartition(partitionInfo.topic(), partitionInfo.partition()));
+  //         });
+  //   }
+  //   if (!existingTopicPartitions.contains(topicPartition)) {
+  //     return false;
+  //   }
+  //   return true;
+  // }
 
   private TimestampPolicyContext updateWatermarkManually(
       TimestampPolicy<K, V> timestampPolicy,
@@ -575,7 +588,18 @@ abstract class ReadFromKafkaDoFn<K, V>
                 });
     keyDeserializerInstance = keyDeserializerProvider.getDeserializer(consumerConfig, true);
     valueDeserializerInstance = valueDeserializerProvider.getDeserializer(consumerConfig, false);
-    offsetEstimatorCache = new HashMap<>();
+    offsetEstimatorCache =
+        CacheBuilder.newBuilder()
+            .maximumSize(1000L)
+            .expireAfterAccess(1, TimeUnit.SECONDS)
+            .removalListener(
+                (RemovalNotification<TopicPartition, KafkaLatestOffsetEstimator> listener) -> {
+                  if (listener.getValue() != null) {
+                    listener.getValue().close();
+                  }
+                })
+            .build();
+
     if (checkStopReadingFn != null) {
       checkStopReadingFn.setup();
     }
@@ -595,7 +619,7 @@ abstract class ReadFromKafkaDoFn<K, V>
     }
 
     if (offsetEstimatorCache != null) {
-      offsetEstimatorCache.clear();
+      offsetEstimatorCache.cleanUp();
     }
     if (checkStopReadingFn != null) {
       checkStopReadingFn.teardown();
