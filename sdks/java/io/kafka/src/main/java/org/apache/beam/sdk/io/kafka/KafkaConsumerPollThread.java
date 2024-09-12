@@ -35,6 +35,7 @@ import org.apache.beam.sdk.io.UnboundedSource;
 import org.apache.beam.sdk.util.Preconditions;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.io.Closeables;
 import org.apache.kafka.clients.consumer.Consumer;
+import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.common.PartitionInfo;
@@ -208,6 +209,12 @@ public class KafkaConsumerPollThread {
     return records;
   }
 
+  public void putBackToQueue(Map<TopicPartition, List<ConsumerRecord<byte[], byte[]>>> rawRecords) {
+    // todo handle InterruptedException
+    availableRecordsQueue.offer(
+        new ConsumerRecords<>(rawRecords), RECORDS_ENQUEUE_POLL_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+  }
+
   /**
    * Enqueue checkpoint mark to be committed to Kafka. This does not block until it is committed.
    * There could be a delay of up to KAFKA_POLL_TIMEOUT (1 second). Any checkpoint mark enqueued
@@ -237,4 +244,6 @@ public class KafkaConsumerPollThread {
                       p -> new OffsetAndMetadata(p.getNextOffset()))));
     }
   }
+
+
 }

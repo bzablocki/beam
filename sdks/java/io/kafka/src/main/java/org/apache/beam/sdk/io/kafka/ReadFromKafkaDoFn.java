@@ -22,6 +22,7 @@ import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Pr
 import java.time.Duration;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -59,6 +60,7 @@ import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.cache.CacheBui
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.cache.CacheLoader;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.cache.LoadingCache;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableMap;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.io.Closeables;
 import org.apache.kafka.clients.consumer.Consumer;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
@@ -459,9 +461,40 @@ abstract class ReadFromKafkaDoFn<K, V>
           }
           return ProcessContinuation.resume();
         }
-        for (ConsumerRecord<byte[], byte[]> rawRecord : rawRecords) {
+        Iterator<ConsumerRecord<byte[], byte[]>> recordsIterator = rawRecords.iterator();
+        while (recordsIterator.hasNext()) {
+          ConsumerRecord<byte[], byte[]> rawRecord = recordsIterator.next();
+          // for (ConsumerRecord<byte[], byte[]> rawRecord : rawRecords) {
           if (!tracker.tryClaim(rawRecord.offset())) {
             // XXX need to add unconsumed records back.
+            // todo what should happen here?
+            //  Let's say we have X outstanding records in the queue in the background thread
+            //  and this tracker is not letting us claim this particular record.
+            //  We have to call `ProcessContinuation.stop()`, and do something with this and further
+            //  records.
+            //  But what?
+            //  Should we also close the thread that reads the data?
+            //  My answer:
+            //  We don't close the background thread, can it be picked up be the next tracker?
+            //  'acquireConsumer()' take startoffset as an argument, but doesn't use this as a key.
+            //  How to test it?
+            //  So maybe put it back to the queue.
+            ImmutableList.Builder<ConsumerRecord<byte[], byte[]>> recordListBuilder =
+                new ImmutableList.Builder<>();
+            recordListBuilder.add(rawRecord);
+            // drain rawRecords
+            while (recordsIterator.hasNext()) {
+              rawRecord = recordsIterator.next();
+              recordListBuilder.add(rawRecord);
+            }
+            ImmutableList<ConsumerRecord<byte[], byte[]>> recordsToPutBack =
+                recordListBuilder.build();
+            ImmutableMap<TopicPartition, List<ConsumerRecord<byte[], byte[]>>>
+                recordsPerTopicPartition =
+                    ImmutableMap.of(kafkaSourceDescriptor.getTopicPartition(), recordsToPutBack);
+
+            pollThread.putBackToQueue(recordsPerTopicPartition);
+
             return ProcessContinuation.stop();
           }
           try {
