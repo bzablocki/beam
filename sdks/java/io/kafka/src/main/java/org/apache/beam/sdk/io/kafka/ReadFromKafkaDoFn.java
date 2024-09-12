@@ -21,8 +21,11 @@ import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Pr
 
 import java.time.Duration;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import org.apache.beam.model.fnexecution.v1.BeamFnApi;
 import org.apache.beam.sdk.coders.Coder;
@@ -50,7 +53,6 @@ import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.TupleTag;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.annotations.VisibleForTesting;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.MoreObjects;
-import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Stopwatch;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Supplier;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Suppliers;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.cache.CacheBuilder;
@@ -62,6 +64,7 @@ import org.apache.kafka.clients.consumer.Consumer;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
+import org.apache.kafka.common.PartitionInfo;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.errors.SerializationException;
 import org.apache.kafka.common.serialization.Deserializer;
@@ -313,7 +316,6 @@ abstract class ReadFromKafkaDoFn<K, V>
       } else if (stopReadTime != null) {
         endOffset = ConsumerSpEL.offsetForTime(offsetConsumer, partition, stopReadTime);
       }
-      new OffsetRange(startOffset, endOffset);
       Lineage.getSources()
           .add(
               "kafka",
@@ -447,16 +449,16 @@ abstract class ReadFromKafkaDoFn<K, V>
         ConsumerRecords<byte[], byte[]> rawRecords = pollThread.readRecords();
         // When there are no records available for the current TopicPartition, self-checkpoint
         // and move to process the next element.
-        // if (rawRecords.isEmpty()) {
-        //   if (!topicPartitionExists(
-        //       kafkaSourceDescriptor.getTopicPartition(), consumer.listTopics())) {
-        //     return ProcessContinuation.stop();
-        //   }
-        //   if (timestampPolicy != null) {
-        //     updateWatermarkManually(timestampPolicy, watermarkEstimator, tracker);
-        //   }
-        //   return ProcessContinuation.resume();
-        // }
+        if (pollThread.isTopicListUpdated() && rawRecords.isEmpty()) {
+          Map<String, List<PartitionInfo>> topicsList = pollThread.getTopicsList();
+          if (!topicPartitionExists(kafkaSourceDescriptor.getTopicPartition(), topicsList)) {
+            return ProcessContinuation.stop();
+          }
+          if (timestampPolicy != null) {
+            updateWatermarkManually(timestampPolicy, watermarkEstimator, tracker);
+          }
+          return ProcessContinuation.resume();
+        }
         for (ConsumerRecord<byte[], byte[]> rawRecord : rawRecords) {
           if (!tracker.tryClaim(rawRecord.offset())) {
             // XXX need to add unconsumed records back.
@@ -524,22 +526,22 @@ abstract class ReadFromKafkaDoFn<K, V>
     }
   }
 
-  // private boolean topicPartitionExists(
-  //     TopicPartition topicPartition, Map<String, List<PartitionInfo>> topicListMap) {
-  //   // Check if the current TopicPartition still exists.
-  //   Set<TopicPartition> existingTopicPartitions = new HashSet<>();
-  //   for (List<PartitionInfo> topicPartitionList : topicListMap.values()) {
-  //     topicPartitionList.forEach(
-  //         partitionInfo -> {
-  //           existingTopicPartitions.add(
-  //               new TopicPartition(partitionInfo.topic(), partitionInfo.partition()));
-  //         });
-  //   }
-  //   if (!existingTopicPartitions.contains(topicPartition)) {
-  //     return false;
-  //   }
-  //   return true;
-  // }
+  private boolean topicPartitionExists(
+      TopicPartition topicPartition, Map<String, List<PartitionInfo>> topicListMap) {
+    // Check if the current TopicPartition still exists.
+    Set<TopicPartition> existingTopicPartitions = new HashSet<>();
+    for (List<PartitionInfo> topicPartitionList : topicListMap.values()) {
+      topicPartitionList.forEach(
+          partitionInfo -> {
+            existingTopicPartitions.add(
+                new TopicPartition(partitionInfo.topic(), partitionInfo.partition()));
+          });
+    }
+    if (!existingTopicPartitions.contains(topicPartition)) {
+      return false;
+    }
+    return true;
+  }
 
   private TimestampPolicyContext updateWatermarkManually(
       TimestampPolicy<K, V> timestampPolicy,

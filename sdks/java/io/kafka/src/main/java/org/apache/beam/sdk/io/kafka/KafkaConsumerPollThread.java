@@ -19,6 +19,9 @@ package org.apache.beam.sdk.io.kafka;
 
 import java.io.IOException;
 import java.time.Duration;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
@@ -34,6 +37,7 @@ import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.io.Closeables;
 import org.apache.kafka.clients.consumer.Consumer;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.consumer.OffsetAndMetadata;
+import org.apache.kafka.common.PartitionInfo;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.errors.WakeupException;
 import org.checkerframework.checker.nullness.qual.Nullable;
@@ -73,7 +77,8 @@ public class KafkaConsumerPollThread {
   private final AtomicReference<@Nullable KafkaCheckpointMark> finalizedCheckpointMark =
       new AtomicReference<>();
   private final AtomicBoolean closed = new AtomicBoolean(false);
-
+  private final Map<String, List<PartitionInfo>> topicsList = new ConcurrentHashMap<>();
+  private final AtomicBoolean topicListUpdated = new AtomicBoolean(false);
   private static final Logger LOG = LoggerFactory.getLogger(KafkaConsumerPollThread.class);
 
   private @Nullable Future<?> pollFuture;
@@ -130,6 +135,7 @@ public class KafkaConsumerPollThread {
         try {
           if (records.isEmpty()) {
             records = consumer.poll(KAFKA_POLL_TIMEOUT);
+            updateTopicList(consumer);
           } else if (availableRecordsQueue.offer(
               records, RECORDS_ENQUEUE_POLL_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS)) {
             records = ConsumerRecords.empty();
@@ -151,6 +157,25 @@ public class KafkaConsumerPollThread {
     LOG.info("{}: Returning from consumer pool loop", this);
     // Commit any pending finalized checkpoint before shutdown.
     commitCheckpointMark();
+  }
+
+  private void updateTopicList(Consumer<byte[], byte[]> consumer) {
+    synchronized (topicsList) {
+      Map<String, List<PartitionInfo>> currentTopicsList = consumer.listTopics();
+      topicsList.clear();
+      topicsList.putAll(currentTopicsList);
+      topicListUpdated.set(true);
+    }
+  }
+
+  public boolean isTopicListUpdated() {
+    return topicListUpdated.get();
+  }
+
+  public Map<String, List<PartitionInfo>> getTopicsList() {
+    synchronized (topicsList) {
+      return topicsList;
+    }
   }
 
   ConsumerRecords<byte[], byte[]> readRecords() throws IOException {
