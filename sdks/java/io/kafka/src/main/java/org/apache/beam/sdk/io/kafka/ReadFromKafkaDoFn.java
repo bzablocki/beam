@@ -447,16 +447,16 @@ abstract class ReadFromKafkaDoFn<K, V>
         ConsumerRecords<byte[], byte[]> rawRecords = pollThread.readRecords();
         // When there are no records available for the current TopicPartition, self-checkpoint
         // and move to process the next element.
-        if (rawRecords.isEmpty()) {
-          if (!topicPartitionExists(
-              kafkaSourceDescriptor.getTopicPartition(), consumer.listTopics())) {
-            return ProcessContinuation.stop();
-          }
-          if (timestampPolicy != null) {
-            updateWatermarkManually(timestampPolicy, watermarkEstimator, tracker);
-          }
-          return ProcessContinuation.resume();
-        }
+        // if (rawRecords.isEmpty()) {
+        //   if (!topicPartitionExists(
+        //       kafkaSourceDescriptor.getTopicPartition(), consumer.listTopics())) {
+        //     return ProcessContinuation.stop();
+        //   }
+        //   if (timestampPolicy != null) {
+        //     updateWatermarkManually(timestampPolicy, watermarkEstimator, tracker);
+        //   }
+        //   return ProcessContinuation.resume();
+        // }
         for (ConsumerRecord<byte[], byte[]> rawRecord : rawRecords) {
           if (!tracker.tryClaim(rawRecord.offset())) {
             // XXX need to add unconsumed records back.
@@ -524,22 +524,22 @@ abstract class ReadFromKafkaDoFn<K, V>
     }
   }
 
-  private boolean topicPartitionExists(
-      TopicPartition topicPartition, Map<String, List<PartitionInfo>> topicListMap) {
-    // Check if the current TopicPartition still exists.
-    Set<TopicPartition> existingTopicPartitions = new HashSet<>();
-    for (List<PartitionInfo> topicPartitionList : topicListMap.values()) {
-      topicPartitionList.forEach(
-          partitionInfo -> {
-            existingTopicPartitions.add(
-                new TopicPartition(partitionInfo.topic(), partitionInfo.partition()));
-          });
-    }
-    if (!existingTopicPartitions.contains(topicPartition)) {
-      return false;
-    }
-    return true;
-  }
+  // private boolean topicPartitionExists(
+  //     TopicPartition topicPartition, Map<String, List<PartitionInfo>> topicListMap) {
+  //   // Check if the current TopicPartition still exists.
+  //   Set<TopicPartition> existingTopicPartitions = new HashSet<>();
+  //   for (List<PartitionInfo> topicPartitionList : topicListMap.values()) {
+  //     topicPartitionList.forEach(
+  //         partitionInfo -> {
+  //           existingTopicPartitions.add(
+  //               new TopicPartition(partitionInfo.topic(), partitionInfo.partition()));
+  //         });
+  //   }
+  //   if (!existingTopicPartitions.contains(topicPartition)) {
+  //     return false;
+  //   }
+  //   return true;
+  // }
 
   private TimestampPolicyContext updateWatermarkManually(
       TimestampPolicy<K, V> timestampPolicy,
