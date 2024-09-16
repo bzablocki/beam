@@ -27,7 +27,7 @@ import java.io.Serializable;
  * <p>Implementations of this interface are responsible for managing the connection to the broker
  * and for receiving messages from the broker.
  */
-public interface MessageReceiver extends Serializable {
+public interface MessageReceiver {
   /**
    * Starts the message receiver.
    *
