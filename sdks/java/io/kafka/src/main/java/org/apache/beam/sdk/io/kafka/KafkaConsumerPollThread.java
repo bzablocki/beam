@@ -33,6 +33,8 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 import org.apache.beam.sdk.io.UnboundedSource;
 import org.apache.beam.sdk.util.Preconditions;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterators;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.PeekingIterator;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.io.Closeables;
 import org.apache.kafka.clients.consumer.Consumer;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
@@ -83,13 +85,14 @@ public class KafkaConsumerPollThread {
   private static final Logger LOG = LoggerFactory.getLogger(KafkaConsumerPollThread.class);
 
   private @Nullable Future<?> pollFuture;
+  private @Nullable PeekingIterator<ConsumerRecord<byte[], byte[]>> activeBatchIterator;
 
   void startOnExecutor(ExecutorService executorService, Consumer<byte[], byte[]> consumer) {
     this.consumer = consumer;
     // Use a separate thread to read Kafka messages. Kafka Consumer does all its work including
     // network I/O inside poll(). Polling only inside #advance(), especially with a small timeout
     // like 100 milliseconds does not work well. This along with large receive buffer for
-    // consumer achieved best throughput in tests (see `defaultConsumerProperties`).
+    // consumer achieved the best throughput in tests (see `defaultConsumerProperties`).
     pollFuture = executorService.submit(this::consumerPollLoop);
   }
 
@@ -101,12 +104,14 @@ public class KafkaConsumerPollThread {
     Preconditions.checkStateNotNull(pollFuture);
     closed.set(true);
     try {
-      // Wait for threads to shutdown. Trying this as a loop to handle a tiny race where poll thread
+      // Wait for threads to shut down. Trying this as a loop to handle a tiny race where poll
+      // thread
       // might block to enqueue right after availableRecordsQueue.poll() below.
       while (true) {
         if (consumer != null) {
           consumer.wakeup();
         }
+        // todo will this drop unprocessed records?
         availableRecordsQueue.poll(); // drain unread batch, this unblocks consumer thread.
         try {
           Preconditions.checkStateNotNull(pollFuture);
@@ -124,6 +129,29 @@ public class KafkaConsumerPollThread {
     } finally {
       Closeables.close(consumer, true);
     }
+  }
+
+  @Nullable
+  ConsumerRecord<byte[], byte[]> peek() throws IOException {
+    PeekingIterator<ConsumerRecord<byte[], byte[]>> currentIterator = getOrInitialize();
+    if (currentIterator.hasNext()) {
+      return currentIterator.peek();
+    }
+    return null;
+  }
+
+  void advance() throws IOException {
+    PeekingIterator<ConsumerRecord<byte[], byte[]>> currentIterator = getOrInitialize();
+    if (currentIterator.hasNext()) {
+      currentIterator.next();
+    }
+  }
+
+  private PeekingIterator<ConsumerRecord<byte[], byte[]>> getOrInitialize() throws IOException {
+    if (activeBatchIterator == null || !activeBatchIterator.hasNext()) {
+      activeBatchIterator = Iterators.peekingIterator(readRecords().iterator());
+    }
+    return activeBatchIterator;
   }
 
   private void consumerPollLoop() {
@@ -209,12 +237,6 @@ public class KafkaConsumerPollThread {
     return records;
   }
 
-  public void putBackToQueue(Map<TopicPartition, List<ConsumerRecord<byte[], byte[]>>> rawRecords) {
-    // todo handle InterruptedException
-    availableRecordsQueue.offer(
-        new ConsumerRecords<>(rawRecords), RECORDS_ENQUEUE_POLL_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
-  }
-
   /**
    * Enqueue checkpoint mark to be committed to Kafka. This does not block until it is committed.
    * There could be a delay of up to KAFKA_POLL_TIMEOUT (1 second). Any checkpoint mark enqueued
@@ -244,6 +266,4 @@ public class KafkaConsumerPollThread {
                       p -> new OffsetAndMetadata(p.getNextOffset()))));
     }
   }
-
-
 }

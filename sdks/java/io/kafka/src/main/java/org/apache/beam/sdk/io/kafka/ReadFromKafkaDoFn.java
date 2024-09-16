@@ -22,7 +22,6 @@ import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Pr
 import java.time.Duration;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -60,12 +59,10 @@ import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.cache.CacheBui
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.cache.CacheLoader;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.cache.LoadingCache;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
-import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableMap;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.io.Closeables;
 import org.apache.kafka.clients.consumer.Consumer;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
-import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.common.PartitionInfo;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.errors.SerializationException;
@@ -439,6 +436,11 @@ abstract class ReadFromKafkaDoFn<K, V>
               Optional.ofNullable(watermarkEstimator.currentWatermark()));
     }
     final long startOffset = tracker.currentRestriction().getFrom();
+    String restrictionInfo =
+        String.format(
+            "%s_%s_%s",
+            kafkaSourceDescriptor.getTopic(), kafkaSourceDescriptor.getPartition(), startOffset);
+    LOG.info("bzablockilog start restriction {}", restrictionInfo);
     long resumeOffset = startOffset;
     @Nullable KafkaConsumerPollThread pollThread = null;
     try {
@@ -448,55 +450,40 @@ abstract class ReadFromKafkaDoFn<K, V>
               .acquireConsumer(
                   updatedConsumerConfig, consumerFactoryFn, kafkaSourceDescriptor, startOffset);
       while (true) {
-        ConsumerRecords<byte[], byte[]> rawRecords = pollThread.readRecords();
+        ConsumerRecord<byte[], byte[]> rawRecord = pollThread.peek();
+
         // When there are no records available for the current TopicPartition, self-checkpoint
         // and move to process the next element.
-        if (pollThread.isTopicListUpdated() && rawRecords.isEmpty()) {
+        // if (pollThread.isTopicListUpdated() && !rawRecordOptional.isPresent()) {
+        if (pollThread.isTopicListUpdated() && rawRecord == null) {
           Map<String, List<PartitionInfo>> topicsList = pollThread.getTopicsList();
           if (!topicPartitionExists(kafkaSourceDescriptor.getTopicPartition(), topicsList)) {
+            LOG.info("bzablockilog stop restriction {}", restrictionInfo);
             return ProcessContinuation.stop();
           }
           if (timestampPolicy != null) {
             updateWatermarkManually(timestampPolicy, watermarkEstimator, tracker);
           }
+          LOG.info("bzablockilog resume restriction {}", restrictionInfo);
           return ProcessContinuation.resume();
         }
-        Iterator<ConsumerRecord<byte[], byte[]>> recordsIterator = rawRecords.iterator();
-        while (recordsIterator.hasNext()) {
-          ConsumerRecord<byte[], byte[]> rawRecord = recordsIterator.next();
-          // for (ConsumerRecord<byte[], byte[]> rawRecord : rawRecords) {
+
+        if (rawRecord != null) {
+          LOG.info(
+              "bzablockilog picked up {}_{}_{}",
+              rawRecord.topic(),
+              rawRecord.partition(),
+              rawRecord.offset());
           if (!tracker.tryClaim(rawRecord.offset())) {
+            LOG.info(
+                "bzablockilog unsuccessful claim of {}_{}_{}",
+                rawRecord.topic(),
+                rawRecord.partition(),
+                rawRecord.offset());
             // XXX need to add unconsumed records back.
-            // todo what should happen here?
-            //  Let's say we have X outstanding records in the queue in the background thread
-            //  and this tracker is not letting us claim this particular record.
-            //  We have to call `ProcessContinuation.stop()`, and do something with this and further
-            //  records.
-            //  But what?
-            //  Should we also close the thread that reads the data?
-            //  My answer:
-            //  We don't close the background thread, can it be picked up be the next tracker?
-            //  'acquireConsumer()' take startoffset as an argument, but doesn't use this as a key.
-            //  How to test it?
-            //  So maybe put it back to the queue.
-            ImmutableList.Builder<ConsumerRecord<byte[], byte[]>> recordListBuilder =
-                new ImmutableList.Builder<>();
-            recordListBuilder.add(rawRecord);
-            // drain rawRecords
-            while (recordsIterator.hasNext()) {
-              rawRecord = recordsIterator.next();
-              recordListBuilder.add(rawRecord);
-            }
-            ImmutableList<ConsumerRecord<byte[], byte[]>> recordsToPutBack =
-                recordListBuilder.build();
-            ImmutableMap<TopicPartition, List<ConsumerRecord<byte[], byte[]>>>
-                recordsPerTopicPartition =
-                    ImmutableMap.of(kafkaSourceDescriptor.getTopicPartition(), recordsToPutBack);
-
-            pollThread.putBackToQueue(recordsPerTopicPartition);
-
             return ProcessContinuation.stop();
           }
+
           try {
             KafkaRecord<K, V> kafkaRecord =
                 new KafkaRecord<>(
@@ -538,11 +525,13 @@ abstract class ReadFromKafkaDoFn<K, V>
                 rawRecord,
                 null,
                 e,
-                "Failure deserializing Key or Value of Kakfa record reading from Kafka");
+                "Failure deserializing Key or Value of Kafka record reading from Kafka");
             if (timestampPolicy != null) {
               updateWatermarkManually(timestampPolicy, watermarkEstimator, tracker);
             }
           }
+
+          pollThread.advance();
         }
       }
     } finally {
