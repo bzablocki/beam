@@ -443,6 +443,11 @@ abstract class ReadFromKafkaDoFn<K, V>
       long startOffset = tracker.currentRestriction().getFrom();
 
       long expectedOffset = startOffset;
+      String restrictionInfo =
+          String.format(
+              "%s_%s_%s",
+              kafkaSourceDescriptor.getTopic(), kafkaSourceDescriptor.getPartition(), startOffset);
+      LOG.info("bzablockilog start restriction {}", restrictionInfo);
       consumer.seek(kafkaSourceDescriptor.getTopicPartition(), startOffset);
       ConsumerRecords<byte[], byte[]> rawRecords = ConsumerRecords.empty();
 
@@ -453,15 +458,29 @@ abstract class ReadFromKafkaDoFn<K, V>
         if (rawRecords.isEmpty()) {
           if (!topicPartitionExists(
               kafkaSourceDescriptor.getTopicPartition(), consumer.listTopics())) {
+            LOG.info("bzablockilog stop restriction {}", restrictionInfo);
+
             return ProcessContinuation.stop();
           }
           if (timestampPolicy != null) {
             updateWatermarkManually(timestampPolicy, watermarkEstimator, tracker);
           }
+          LOG.info("bzablockilog resume restriction {}", restrictionInfo);
+
           return ProcessContinuation.resume();
         }
         for (ConsumerRecord<byte[], byte[]> rawRecord : rawRecords) {
+          LOG.info(
+              "bzablockilog picked up {}_{}_{}",
+              rawRecord.topic(),
+              rawRecord.partition(),
+              rawRecord.offset());
           if (!tracker.tryClaim(rawRecord.offset())) {
+            LOG.info(
+                "bzablockilog unsuccessful claim of {}_{}_{}",
+                rawRecord.topic(),
+                rawRecord.partition(),
+                rawRecord.offset());
             return ProcessContinuation.stop();
           }
           try {
