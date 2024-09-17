@@ -17,15 +17,17 @@
  */
 package org.apache.beam.sdk.io.kafka;
 
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkNotNull;
 import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkState;
 
+import java.time.Duration;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
-import java.util.concurrent.TimeUnit;
+import org.apache.beam.model.fnexecution.v1.BeamFnApi;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.io.kafka.KafkaIO.ReadSourceDescriptors;
 import org.apache.beam.sdk.io.kafka.KafkaIOUtils.MovingAvg;
@@ -223,10 +225,13 @@ abstract class ReadFromKafkaDoFn<K, V>
   private transient @Nullable Deserializer<V> valueDeserializerInstance = null;
   private transient @Nullable Map<TopicPartition, KafkaLatestOffsetEstimator> offsetEstimatorCache;
 
+  private static final Supplier<KafkaOffsetConsumerPollThreadCache> offsetCache =
+      Suppliers.memoize(KafkaOffsetConsumerPollThreadCache::new);
+
   private transient @Nullable LoadingCache<TopicPartition, AverageRecordSize> avgRecordSize;
   private static final long DEFAULT_KAFKA_POLL_TIMEOUT = 2L;
 
-  private HashMap<String, Long> perPartitionBacklogMetrics = new HashMap<String, Long>();;
+  private final HashMap<String, Long> perPartitionBacklogMetrics = new HashMap<>();
 
   @VisibleForTesting final long consumerPollingTimeout;
   @VisibleForTesting final DeserializerProvider<K> keyDeserializerProvider;
@@ -244,42 +249,41 @@ abstract class ReadFromKafkaDoFn<K, V>
   private static class KafkaLatestOffsetEstimator
       implements GrowableOffsetRangeTracker.RangeEndEstimator {
 
-    private final Consumer<byte[], byte[]> offsetConsumer;
-    private final TopicPartition topicPartition;
-    private final Supplier<Long> memoizedBacklog;
-    private boolean closed;
+    private final KafkaOffsetConsumerPollThread kafkaOffsetConsumerPollThread;
+    private final KafkaSourceDescriptor kafkaSourceDescriptor;
+    private boolean closed = false;
 
-    KafkaLatestOffsetEstimator(
-        Consumer<byte[], byte[]> offsetConsumer, TopicPartition topicPartition) {
-      this.offsetConsumer = offsetConsumer;
-      this.topicPartition = topicPartition;
-      ConsumerSpEL.evaluateAssign(this.offsetConsumer, ImmutableList.of(this.topicPartition));
-      memoizedBacklog =
-          Suppliers.memoizeWithExpiration(
-              () -> {
-                synchronized (offsetConsumer) {
-                  ConsumerSpEL.evaluateSeek2End(offsetConsumer, topicPartition);
-                  return offsetConsumer.position(topicPartition);
-                }
-              },
-              1,
-              TimeUnit.SECONDS);
+    public KafkaLatestOffsetEstimator(
+        Map<String, Object> offsetConsumerConfig1,
+        SerializableFunction<Map<String, Object>, Consumer<byte[], byte[]>> consumerFactoryFn,
+        KafkaSourceDescriptor kafkaSourceDescriptor) {
+      this.kafkaSourceDescriptor = kafkaSourceDescriptor;
+      this.kafkaOffsetConsumerPollThread =
+          offsetCache
+              .get()
+              .acquireOffsetTrackerConsumer(
+                  offsetConsumerConfig1, consumerFactoryFn, kafkaSourceDescriptor);
     }
 
     @Override
     protected void finalize() {
       try {
-        Closeables.close(offsetConsumer, true);
+        // todo do we need any action to close it?
+        // Closeables.close(offsetConsumer, true);
         closed = true;
-        LOG.info("Offset Estimator consumer was closed for {}", topicPartition);
+        LOG.info(
+            "bzablockilogkafka Offset Estimator consumer was closed for {}",
+            kafkaSourceDescriptor.getTopicPartition());
       } catch (Exception anyException) {
-        LOG.warn("Failed to close offset consumer for {}", topicPartition);
+        LOG.warn(
+            "bzablockilogkafka Failed to close offset consumer for {}",
+            kafkaSourceDescriptor.getTopicPartition());
       }
     }
 
     @Override
     public long estimate() {
-      return memoizedBacklog.get();
+      return kafkaOffsetConsumerPollThread.readEndOffset();
     }
 
     public boolean isClosed() {
@@ -312,7 +316,6 @@ abstract class ReadFromKafkaDoFn<K, V>
       } else if (stopReadTime != null) {
         endOffset = ConsumerSpEL.offsetForTime(offsetConsumer, partition, stopReadTime);
       }
-      new OffsetRange(startOffset, endOffset);
       Lineage.getSources()
           .add(
               "kafka",
@@ -377,14 +380,17 @@ abstract class ReadFromKafkaDoFn<K, V>
       Map<String, Object> updatedConsumerConfig =
           overrideBootstrapServersConfig(consumerConfig, kafkaSourceDescriptor);
 
-      LOG.info("Creating Kafka consumer for offset estimation for {}", topicPartition);
+      // LOG.info("Creating Kafka consumer for offset estimation for {}", topicPartition);
 
-      Consumer<byte[], byte[]> offsetConsumer =
-          consumerFactoryFn.apply(
-              KafkaIOUtils.getOffsetConsumerConfig(
-                  "tracker-" + topicPartition, offsetConsumerConfig, updatedConsumerConfig));
-      offsetEstimator = new KafkaLatestOffsetEstimator(offsetConsumer, topicPartition);
-      offsetEstimatorCacheInstance.put(topicPartition, offsetEstimator);
+      Map<String, Object> offsetConsumerConfig1 =
+          KafkaIOUtils.getOffsetConsumerConfig(
+              "tracker-" + topicPartition, offsetConsumerConfig, updatedConsumerConfig);
+
+      offsetEstimator =
+          new KafkaLatestOffsetEstimator(
+              offsetConsumerConfig1, consumerFactoryFn, kafkaSourceDescriptor);
+      // offsetEstimator = new KafkaLatestOffsetEstimator(offsetConsumer, topicPartition);
+      // offsetEstimatorCacheInstance.put(topicPartition, offsetEstimator);
     }
 
     return new GrowableOffsetRangeTracker(restriction.getFrom(), offsetEstimator);
@@ -632,7 +638,7 @@ abstract class ReadFromKafkaDoFn<K, V>
     }
 
     if (offsetEstimatorCache != null) {
-      offsetEstimatorCache.clear();
+      checkNotNull(offsetEstimatorCache).clear();
     }
     if (checkStopReadingFn != null) {
       checkStopReadingFn.teardown();
@@ -654,8 +660,8 @@ abstract class ReadFromKafkaDoFn<K, V>
   }
 
   private static class AverageRecordSize {
-    private MovingAvg avgRecordSize;
-    private MovingAvg avgRecordGap;
+    private final MovingAvg avgRecordSize;
+    private final MovingAvg avgRecordGap;
 
     public AverageRecordSize() {
       this.avgRecordSize = new MovingAvg();
