@@ -20,14 +20,12 @@ package org.apache.beam.sdk.io.kafka;
 import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkNotNull;
 import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkState;
 
-import java.time.Duration;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
-import org.apache.beam.model.fnexecution.v1.BeamFnApi;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.io.kafka.KafkaIO.ReadSourceDescriptors;
 import org.apache.beam.sdk.io.kafka.KafkaIOUtils.MovingAvg;
@@ -449,11 +447,12 @@ abstract class ReadFromKafkaDoFn<K, V>
       long startOffset = tracker.currentRestriction().getFrom();
 
       long expectedOffset = startOffset;
-      String restrictionInfo =
-          String.format(
-              "%s_%s_%s",
-              kafkaSourceDescriptor.getTopic(), kafkaSourceDescriptor.getPartition(), startOffset);
-      LOG.info("bzablockilog start restriction {}", restrictionInfo);
+      // String restrictionInfo =
+      //     String.format(
+      //         "%s_%s_%s",
+      //         kafkaSourceDescriptor.getTopic(), kafkaSourceDescriptor.getPartition(),
+      // startOffset);
+      // LOG.info("bzablockilog start restriction {}", restrictionInfo);
       consumer.seek(kafkaSourceDescriptor.getTopicPartition(), startOffset);
       ConsumerRecords<byte[], byte[]> rawRecords = ConsumerRecords.empty();
 
@@ -464,29 +463,29 @@ abstract class ReadFromKafkaDoFn<K, V>
         if (rawRecords.isEmpty()) {
           if (!topicPartitionExists(
               kafkaSourceDescriptor.getTopicPartition(), consumer.listTopics())) {
-            LOG.info("bzablockilog stop restriction {}", restrictionInfo);
+            // LOG.info("bzablockilog stop restriction {}", restrictionInfo);
 
             return ProcessContinuation.stop();
           }
           if (timestampPolicy != null) {
             updateWatermarkManually(timestampPolicy, watermarkEstimator, tracker);
           }
-          LOG.info("bzablockilog resume restriction {}", restrictionInfo);
+          // LOG.info("bzablockilog resume restriction {}", restrictionInfo);
 
           return ProcessContinuation.resume();
         }
         for (ConsumerRecord<byte[], byte[]> rawRecord : rawRecords) {
-          LOG.info(
-              "bzablockilog picked up {}_{}_{}",
-              rawRecord.topic(),
-              rawRecord.partition(),
-              rawRecord.offset());
+          // LOG.info(
+          //     "bzablockilog picked up {}_{}_{}",
+          //     rawRecord.topic(),
+          //     rawRecord.partition(),
+          //     rawRecord.offset());
           if (!tracker.tryClaim(rawRecord.offset())) {
-            LOG.info(
-                "bzablockilog unsuccessful claim of {}_{}_{}",
-                rawRecord.topic(),
-                rawRecord.partition(),
-                rawRecord.offset());
+            // LOG.info(
+            //     "bzablockilog unsuccessful claim of {}_{}_{}",
+            //     rawRecord.topic(),
+            //     rawRecord.partition(),
+            //     rawRecord.offset());
             return ProcessContinuation.stop();
           }
           try {
