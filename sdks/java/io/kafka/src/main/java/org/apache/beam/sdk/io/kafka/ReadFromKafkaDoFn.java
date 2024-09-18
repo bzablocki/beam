@@ -25,7 +25,6 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ExecutionException;
@@ -232,16 +231,17 @@ abstract class ReadFromKafkaDoFn<K, V>
   private static final Duration OFFSET_CLIENT_CACHE_EXPIRATION_AFTER_DURATION =
       Duration.ofMinutes(5); // todo can be static
 
-  private static final Cache<CacheKey, SynchronizedAccessKafkaConsumer>
+  private static final Cache<KafkaSourceDescriptor, SynchronizedAccessKafkaConsumer>
       offsetEstimatiorConsumerCache =
           CacheBuilder.newBuilder()
               .expireAfterAccess(
                   OFFSET_CLIENT_CACHE_EXPIRATION_AFTER_DURATION.toMillis(), TimeUnit.MILLISECONDS)
               .removalListener(
-                  (RemovalNotification<CacheKey, SynchronizedAccessKafkaConsumer> notification) -> {
+                  (RemovalNotification<KafkaSourceDescriptor, SynchronizedAccessKafkaConsumer>
+                          notification) -> {
                     LOG.info(
                         "Asynchronously closing offset reader for {} as it has been not queried for over {}",
-                        checkNotNull(notification.getKey()).descriptor.getTopicPartition(),
+                        checkNotNull(notification.getKey()).getTopicPartition(),
                         OFFSET_CLIENT_CACHE_EXPIRATION_AFTER_DURATION);
                     if (notification.getValue() != null) {
                       notification.getValue().close();
@@ -300,41 +300,6 @@ abstract class ReadFromKafkaDoFn<K, V>
     }
   }
 
-  // todo!!!! equals is actually using only the descriptor
-  private static class CacheKey {
-    final Map<String, Object> consumerConfig;
-    final SerializableFunction<Map<String, Object>, Consumer<byte[], byte[]>> consumerFactoryFn;
-    final KafkaSourceDescriptor descriptor;
-
-    CacheKey(
-        Map<String, Object> consumerConfig,
-        SerializableFunction<Map<String, Object>, Consumer<byte[], byte[]>> consumerFactoryFn,
-        KafkaSourceDescriptor descriptor) {
-      this.consumerConfig = consumerConfig;
-      this.consumerFactoryFn = consumerFactoryFn;
-      this.descriptor = descriptor;
-    }
-
-    @Override
-    public boolean equals(@Nullable Object other) {
-      if (other == null) {
-        return false;
-      }
-      if (!(other instanceof CacheKey)) {
-        return false;
-      }
-      CacheKey otherKey = (CacheKey) other;
-      return descriptor.equals(otherKey.descriptor);
-      // && consumerFactoryFn.equals(otherKey.consumerFactoryFn)
-      // && consumerConfig.equals(otherKey.consumerConfig);
-    }
-
-    @Override
-    public int hashCode() {
-      return Objects.hash(descriptor); // , consumerFactoryFn, consumerConfig);
-    }
-  }
-
   /**
    * A {@link GrowableOffsetRangeTracker.RangeEndEstimator} which uses a Kafka {@link Consumer} to
    * fetch backlog.
@@ -342,7 +307,6 @@ abstract class ReadFromKafkaDoFn<K, V>
   private static class KafkaLatestOffsetEstimator
       implements GrowableOffsetRangeTracker.RangeEndEstimator {
 
-    // private final KafkaSourceDescriptor kafkaSourceDescriptor;
     private final SupplierThrowable<SynchronizedAccessKafkaConsumer, ExecutionException>
         synchronizedAccessConsumer;
 
@@ -351,17 +315,14 @@ abstract class ReadFromKafkaDoFn<K, V>
       T get() throws E; // todo extract to a separate file?
     }
 
-    // private final Supplier<Long> endPositionSupplier;
-
     public KafkaLatestOffsetEstimator(
         Map<String, Object> offsetConsumerConfig,
         SerializableFunction<Map<String, Object>, Consumer<byte[], byte[]>> consumerFactoryFn,
         KafkaSourceDescriptor kafkaSourceDescriptor) {
-      // this.kafkaSourceDescriptor = kafkaSourceDescriptor;
       synchronizedAccessConsumer =
           () ->
               offsetEstimatiorConsumerCache.get(
-                  new CacheKey(offsetConsumerConfig, consumerFactoryFn, kafkaSourceDescriptor),
+                  kafkaSourceDescriptor,
                   () -> {
                     LOG.info(
                         "bzablockilogkafka creating a new offset consumer {}",
@@ -373,6 +334,7 @@ abstract class ReadFromKafkaDoFn<K, V>
                   });
     }
 
+    // todo move to utils or something
     private static Consumer<byte[], byte[]> createNewOffsetConsumer(
         Map<String, Object> offsetConsumerConfig,
         SerializableFunction<Map<String, Object>, Consumer<byte[], byte[]>> consumerFactoryFn,
@@ -385,9 +347,6 @@ abstract class ReadFromKafkaDoFn<K, V>
 
     @Override
     public long estimate() {
-      // LOG.info(
-      //     "bzablockilogkafka querying for the end offset for {}",
-      //     kafkaSourceDescriptor.getTopicPartition());
       try {
         return synchronizedAccessConsumer.get().getEndOffset();
       } catch (ExecutionException e) {
