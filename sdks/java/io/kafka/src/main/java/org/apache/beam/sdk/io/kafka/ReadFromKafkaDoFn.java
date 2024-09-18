@@ -20,12 +20,16 @@ package org.apache.beam.sdk.io.kafka;
 import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkNotNull;
 import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkState;
 
+import java.time.Duration;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.io.kafka.KafkaIO.ReadSourceDescriptors;
 import org.apache.beam.sdk.io.kafka.KafkaIOUtils.MovingAvg;
@@ -54,9 +58,11 @@ import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.MoreObjec
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Stopwatch;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Supplier;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Suppliers;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.cache.Cache;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.cache.CacheBuilder;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.cache.CacheLoader;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.cache.LoadingCache;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.cache.RemovalNotification;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.io.Closeables;
 import org.apache.kafka.clients.consumer.Consumer;
@@ -223,8 +229,25 @@ abstract class ReadFromKafkaDoFn<K, V>
   private transient @Nullable Deserializer<V> valueDeserializerInstance = null;
   private transient @Nullable Map<TopicPartition, KafkaLatestOffsetEstimator> offsetEstimatorCache;
 
-  private static final Supplier<KafkaOffsetConsumerPollThreadCache> offsetCache =
-      Suppliers.memoize(KafkaOffsetConsumerPollThreadCache::new);
+  private static final Duration OFFSET_CLIENT_CACHE_EXPIRATION_AFTER_DURATION =
+      Duration.ofMinutes(5); // todo can be static
+
+  private static final Cache<CacheKey, SynchronizedAccessKafkaConsumer>
+      offsetEstimatiorConsumerCache =
+          CacheBuilder.newBuilder()
+              .expireAfterAccess(
+                  OFFSET_CLIENT_CACHE_EXPIRATION_AFTER_DURATION.toMillis(), TimeUnit.MILLISECONDS)
+              .removalListener(
+                  (RemovalNotification<CacheKey, SynchronizedAccessKafkaConsumer> notification) -> {
+                    LOG.info(
+                        "Asynchronously closing offset reader for {} as it has been not queried for over {}",
+                        checkNotNull(notification.getKey()).descriptor.getTopicPartition(),
+                        OFFSET_CLIENT_CACHE_EXPIRATION_AFTER_DURATION);
+                    if (notification.getValue() != null) {
+                      notification.getValue().close();
+                    }
+                  })
+              .build();
 
   private transient @Nullable LoadingCache<TopicPartition, AverageRecordSize> avgRecordSize;
   private static final long DEFAULT_KAFKA_POLL_TIMEOUT = 2L;
@@ -240,6 +263,78 @@ abstract class ReadFromKafkaDoFn<K, V>
   @VisibleForTesting
   static final String RAW_SIZE_METRIC_PREFIX = KafkaUnboundedReader.RAW_SIZE_METRIC_PREFIX;
 
+  private static class SynchronizedAccessKafkaConsumer {
+    private final KafkaSourceDescriptor kafkaSourceDescriptor;
+    private final Consumer<byte[], byte[]> consumer;
+    private @Nullable Supplier<Long> endPositionSupplier = null;
+
+    private SynchronizedAccessKafkaConsumer(
+        KafkaSourceDescriptor kafkaSourceDescriptor, Consumer<byte[], byte[]> consumer) {
+      this.kafkaSourceDescriptor = kafkaSourceDescriptor;
+      this.consumer = consumer;
+    }
+
+    public long getEndOffset() {
+      if (endPositionSupplier == null) {
+        endPositionSupplier =
+            Suppliers.memoizeWithExpiration(this::executeGetEndOffset, 1, TimeUnit.SECONDS);
+      }
+      return endPositionSupplier.get();
+    }
+
+    private Long executeGetEndOffset() {
+      synchronized (consumer) {
+        TopicPartition topicPartition = kafkaSourceDescriptor.getTopicPartition();
+        Long endOffset = consumer.endOffsets(ImmutableList.of(topicPartition)).get(topicPartition);
+        if (endOffset == null) {
+          return Long.MAX_VALUE;
+        }
+        return endOffset;
+      }
+    }
+
+    public void close() {
+      synchronized (consumer) {
+        consumer.close();
+      }
+    }
+  }
+
+  // todo!!!! equals is actually using only the descriptor
+  private static class CacheKey {
+    final Map<String, Object> consumerConfig;
+    final SerializableFunction<Map<String, Object>, Consumer<byte[], byte[]>> consumerFactoryFn;
+    final KafkaSourceDescriptor descriptor;
+
+    CacheKey(
+        Map<String, Object> consumerConfig,
+        SerializableFunction<Map<String, Object>, Consumer<byte[], byte[]>> consumerFactoryFn,
+        KafkaSourceDescriptor descriptor) {
+      this.consumerConfig = consumerConfig;
+      this.consumerFactoryFn = consumerFactoryFn;
+      this.descriptor = descriptor;
+    }
+
+    @Override
+    public boolean equals(@Nullable Object other) {
+      if (other == null) {
+        return false;
+      }
+      if (!(other instanceof CacheKey)) {
+        return false;
+      }
+      CacheKey otherKey = (CacheKey) other;
+      return descriptor.equals(otherKey.descriptor);
+      // && consumerFactoryFn.equals(otherKey.consumerFactoryFn)
+      // && consumerConfig.equals(otherKey.consumerConfig);
+    }
+
+    @Override
+    public int hashCode() {
+      return Objects.hash(descriptor); // , consumerFactoryFn, consumerConfig);
+    }
+  }
+
   /**
    * A {@link GrowableOffsetRangeTracker.RangeEndEstimator} which uses a Kafka {@link Consumer} to
    * fetch backlog.
@@ -247,45 +342,57 @@ abstract class ReadFromKafkaDoFn<K, V>
   private static class KafkaLatestOffsetEstimator
       implements GrowableOffsetRangeTracker.RangeEndEstimator {
 
-    private final KafkaOffsetConsumerPollThread kafkaOffsetConsumerPollThread;
-    private final KafkaSourceDescriptor kafkaSourceDescriptor;
-    private boolean closed = false;
+    // private final KafkaSourceDescriptor kafkaSourceDescriptor;
+    private final SupplierThrowable<SynchronizedAccessKafkaConsumer, ExecutionException>
+        synchronizedAccessConsumer;
 
-    public KafkaLatestOffsetEstimator(
-        Map<String, Object> offsetConsumerConfig1,
-        SerializableFunction<Map<String, Object>, Consumer<byte[], byte[]>> consumerFactoryFn,
-        KafkaSourceDescriptor kafkaSourceDescriptor) {
-      this.kafkaSourceDescriptor = kafkaSourceDescriptor;
-      this.kafkaOffsetConsumerPollThread =
-          offsetCache
-              .get()
-              .acquireOffsetTrackerConsumer(
-                  offsetConsumerConfig1, consumerFactoryFn, kafkaSourceDescriptor);
+    @FunctionalInterface
+    private interface SupplierThrowable<T, E extends Exception> {
+      T get() throws E; // todo extract to a separate file?
     }
 
-    @Override
-    protected void finalize() {
-      try {
-        // todo do we need any action to close it?
-        // Closeables.close(offsetConsumer, true);
-        closed = true;
-        LOG.info(
-            "bzablockilogkafka Offset Estimator consumer was closed for {}",
-            kafkaSourceDescriptor.getTopicPartition());
-      } catch (Exception anyException) {
-        LOG.warn(
-            "bzablockilogkafka Failed to close offset consumer for {}",
-            kafkaSourceDescriptor.getTopicPartition());
-      }
+    // private final Supplier<Long> endPositionSupplier;
+
+    public KafkaLatestOffsetEstimator(
+        Map<String, Object> offsetConsumerConfig,
+        SerializableFunction<Map<String, Object>, Consumer<byte[], byte[]>> consumerFactoryFn,
+        KafkaSourceDescriptor kafkaSourceDescriptor) {
+      // this.kafkaSourceDescriptor = kafkaSourceDescriptor;
+      synchronizedAccessConsumer =
+          () ->
+              offsetEstimatiorConsumerCache.get(
+                  new CacheKey(offsetConsumerConfig, consumerFactoryFn, kafkaSourceDescriptor),
+                  () -> {
+                    LOG.info(
+                        "bzablockilogkafka creating a new offset consumer {}",
+                        kafkaSourceDescriptor.getTopicPartition());
+                    Consumer<byte[], byte[]> consumer =
+                        createNewOffsetConsumer(
+                            offsetConsumerConfig, consumerFactoryFn, kafkaSourceDescriptor);
+                    return new SynchronizedAccessKafkaConsumer(kafkaSourceDescriptor, consumer);
+                  });
+    }
+
+    private static Consumer<byte[], byte[]> createNewOffsetConsumer(
+        Map<String, Object> offsetConsumerConfig,
+        SerializableFunction<Map<String, Object>, Consumer<byte[], byte[]>> consumerFactoryFn,
+        KafkaSourceDescriptor kafkaSourceDescriptor) {
+      Consumer<byte[], byte[]> consumer = consumerFactoryFn.apply(offsetConsumerConfig);
+      ConsumerSpEL.evaluateAssign(
+          consumer, ImmutableList.of(kafkaSourceDescriptor.getTopicPartition()));
+      return consumer;
     }
 
     @Override
     public long estimate() {
-      return kafkaOffsetConsumerPollThread.readEndOffset();
-    }
-
-    public boolean isClosed() {
-      return closed;
+      // LOG.info(
+      //     "bzablockilogkafka querying for the end offset for {}",
+      //     kafkaSourceDescriptor.getTopicPartition());
+      try {
+        return synchronizedAccessConsumer.get().getEndOffset();
+      } catch (ExecutionException e) {
+        return Long.MAX_VALUE;
+      }
     }
   }
 
@@ -374,7 +481,7 @@ abstract class ReadFromKafkaDoFn<K, V>
 
     TopicPartition topicPartition = kafkaSourceDescriptor.getTopicPartition();
     KafkaLatestOffsetEstimator offsetEstimator = offsetEstimatorCacheInstance.get(topicPartition);
-    if (offsetEstimator == null || offsetEstimator.isClosed()) {
+    if (offsetEstimator == null) { // todo || offsetEstimator.isClosed()?
       Map<String, Object> updatedConsumerConfig =
           overrideBootstrapServersConfig(consumerConfig, kafkaSourceDescriptor);
 
@@ -621,6 +728,22 @@ abstract class ReadFromKafkaDoFn<K, V>
     if (checkStopReadingFn != null) {
       checkStopReadingFn.setup();
     }
+
+    // offsetEstimatiorConsumerCache = CacheBuilder.newBuilder()
+    //     .expireAfterWrite(offsetClientCacheDuration.toMillis(), TimeUnit.MILLISECONDS)
+    //     .removalListener(
+    //         (RemovalNotification<TopicPartition, Consumer<byte[], byte[]>> notification) -> {
+    //           LOG.info("bzablockilogkafka notification cause: {}", notification.getCause());
+    //           if (notification.getCause() != RemovalCause.EXPLICIT) {
+    //             LOG.info(
+    //                 "bzablockilogkafka Asynchronously closing offset reader for {} as it has been
+    // idle for over {}",
+    //                 notification.getKey(),
+    //                 offsetClientCacheDuration);
+    //             notification.getValue().close();
+    //           }
+    //         })
+    //     .build();
   }
 
   @Teardown
